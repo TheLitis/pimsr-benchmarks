@@ -42,6 +42,8 @@ class NeuralInverter:
         )
         self.model.load_state_dict(ckpt["model_state"])
         self.model.to(dev).eval()
+        # Post-hoc temperature scaling fitted on the val split (if present).
+        self.sigma_temperature = float(ckpt.get("sigma_temperature_rho", 1.0))
         # observation vector layout: [log10 rho_a | phase/45 | gravity]
         self.n_periods = self.periods.size
         self.n_grav = self.n_obs - 2 * self.n_periods
@@ -73,7 +75,7 @@ class NeuralInverter:
         x = torch.from_numpy(self._pack(log_rho_a, phase, gravity)).unsqueeze(0)
         with torch.no_grad():
             out = self.model(x.to(self.device))
-        sigma = torch.exp(0.5 * out["log_sigma_rho"])
+        sigma = torch.exp(0.5 * out["log_sigma_rho"]) * self.sigma_temperature
         return NeuralPrediction(
             log10_rho=out["log_rho"].squeeze(0).cpu().numpy(),
             sigma_log10_rho=sigma.squeeze(0).cpu().numpy(),
