@@ -137,3 +137,49 @@ obvious MVP-3 item.
    strong anchor and sigma recalibration to preserve the synthetic prior.
 3. The remaining real-data gap is structural (1D physics on 2D/3D geology),
    which motivates the MVP-2 spec's move to 2D meshes.
+
+---
+
+# MVP-3 update: calibrated uncertainty + real-residual noise model
+
+Two changes, then a full regeneration/retraining cycle on the self-hosted
+runner (dataset run 28752222641, training run 28752390483):
+
+1. **Temperature scaling** (`pimsr_inversion.calibrate`): closed-form
+   per-head scale fitted on the val split, stored in the checkpoint and
+   applied transparently at inference. Now part of the training workflow.
+2. **Real-residual noise model** (`pimsr_forward.sensors`): correlated AR(1)
+   distortion along the period axis calibrated on Occam residuals of the 27
+   real stations (pooled std 0.085 log10rho / 5.9 deg phase, lag-1 0.46,
+   per-station amplitude 0.02-0.26). Emulates the 2D/3D-effect misfit that
+   dominates real errors.
+
+## v2 results (dataset with real-calibrated noise)
+
+| Method | Syn RMSE | 1-sigma cov. (ideal 0.68) | Real nRMS | Time/st |
+|---|---|---|---|---|
+| Occam (cold) | 0.951 | — | 2.57 | 391 ms |
+| Neural v2 (calibrated) | **0.545** | **0.77** | 8.36 | **2 ms** |
+| Neural v2 + physics fine-tune | 0.654 | 0.71 | 6.14 | **2 ms** |
+| Hybrid v2 (warm-start Occam) | 0.798 | — | **2.59** | 164 ms |
+
+## What changed vs v1
+
+- **Harder benchmark, wider gap.** The realistic noise makes classical
+  inversion much worse (RMSE 0.79 -> 0.95, 88 -> 391 ms/st as Gauss-Newton
+  fights correlated distortion), while the network degrades only mildly
+  (0.514 -> 0.545). The neural advantage grows from 35% to **43%**.
+- **Uncertainty is now calibrated end-to-end.** Pretrained coverage 0.77 and,
+  crucially, fine-tuned coverage 0.71 vs 0.41 before — temperature scaling
+  fixed the main MVP-2 defect.
+- **Sim-to-real gap narrows at the source.** Domain-randomised training alone
+  cuts real nRMS 9.23 -> 8.36; with physics fine-tuning 6.14 (was 6.99).
+- **Hybrid now matches the classical misfit** (2.59 vs 2.57) — warm-started
+  refinement is strictly dominant on real data: same fit, 2.4x faster.
+
+## Remaining gap and the case for 2D
+
+Even with calibrated noise and fine-tuning, a 1D network cannot express
+lateral structure: nRMS 6.14 vs 2.6 for per-station optimisation. The residual
+gap is structural, confirming the MVP-2 spec decision to move to 2D meshes
+(SimPEG 2D MT forward + conv-2D inversion) as the next milestone.
