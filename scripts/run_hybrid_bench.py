@@ -15,7 +15,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from pimsr_benchmarks.emtf import parse_emtf_xml
+from pimsr_benchmarks.emtf import parse_emtf_xml, resample_station
 from pimsr_benchmarks.hybrid import hybrid_invert
 from pimsr_benchmarks.metrics import profile_rmse, summarize
 from pimsr_benchmarks.neural import NeuralInverter
@@ -61,7 +61,15 @@ def bench_real(inverter: NeuralInverter, emtf_dir: str) -> dict:
     for f in sorted(glob.glob(str(Path(emtf_dir) / "*.xml"))):
         st = parse_emtf_xml(f)
         lr = np.log10(st.rho_a_det)
-        r = hybrid_invert(inverter, lr, st.phase_det, st.periods)
+        n_lr, n_ph, _ = resample_station(st, inverter.periods)
+        r = hybrid_invert(
+            inverter,
+            lr,
+            st.phase_det,
+            st.periods,
+            neural_log_rho_a=n_lr,
+            neural_phase=n_ph,
+        )
         stations.append(
             {
                 "station": st.station_id,

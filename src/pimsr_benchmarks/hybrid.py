@@ -46,13 +46,23 @@ def hybrid_invert(
     gravity: np.ndarray | None = None,
     thicknesses: np.ndarray | None = None,
     max_iterations: int = 12,
+    neural_log_rho_a: np.ndarray | None = None,
+    neural_phase: np.ndarray | None = None,
     **occam_kwargs,
 ) -> HybridResult:
-    """Neural warm start followed by Occam Gauss-Newton refinement."""
+    """Neural warm start followed by Occam Gauss-Newton refinement.
+
+    ``log_rho_a``/``phase``/``periods`` feed the Occam refinement and may lie
+    on any period grid. For real stations whose grid differs from the training
+    grid, pass the response resampled onto ``inverter.periods`` via
+    ``neural_log_rho_a``/``neural_phase``; synthetic data needs neither.
+    """
     t0 = perf_counter()
     thick = default_mesh() if thicknesses is None else np.asarray(thicknesses)
 
-    pred = inverter.invert(log_rho_a, phase, gravity)
+    n_lr = log_rho_a if neural_log_rho_a is None else neural_log_rho_a
+    n_ph = phase if neural_phase is None else neural_phase
+    pred = inverter.invert(n_lr, n_ph, gravity)
     m0 = _project_to_mesh(pred.log10_rho, inverter.depth_grid, thick)
 
     occam = occam1d_invert(
