@@ -35,7 +35,11 @@ class NeuralInverter:
         self.periods = np.asarray(ckpt["periods"])
         self.depth_grid = np.asarray(ckpt["depth_grid"])
         self.n_obs = int(ckpt["n_obs"])
-        self.model = PimsrNet(n_obs=self.n_obs, n_depth=int(ckpt["n_depth"]))
+        self.model = PimsrNet(
+            n_obs=self.n_obs,
+            n_depth=int(ckpt["n_depth"]),
+            n_scenarios=int(ckpt.get("n_scenarios", 4)),
+        )
         self.model.load_state_dict(ckpt["model_state"])
         self.model.to(dev).eval()
         # observation vector layout: [log10 rho_a | phase/45 | gravity]
