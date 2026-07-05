@@ -157,7 +157,9 @@ def bench_real_profile(model, ckpt, emtf_dir, freqs, station_x) -> dict:
     for j_model, x in enumerate(np.linspace(0, section.shape[1] - 1, len(profile)).astype(int)):
         col = section[:, x]
         rho = 10.0 ** col
-        sim_rho, sim_ph = mt1d_response(rho[:-1], thick, periods)
+        # len(z) resistivities with len(z) - 1 thicknesses: the last grid
+        # value acts as the terminating half-space.
+        sim_rho, sim_ph = mt1d_response(rho, thick, periods)
         jx = int(np.argmin(np.abs(x_model - x_km[j_model])))
         d_lr = lr[:, jx] - np.log10(sim_rho)
         d_lr -= d_lr.mean()  # static-shift invariant
