@@ -1,0 +1,285 @@
+{
+  "method": "occam1d",
+  "dataset": "USArray EMTF Yellowstone box",
+  "n_stations": 27,
+  "nrms": {
+    "mean": 2.56918128625621,
+    "median": 2.085709985479075,
+    "p90": 4.3629940529637805,
+    "std": 1.4863155650479245,
+    "n": 27
+  },
+  "converged_frac": 0.18518518518518517,
+  "stations": [
+    {
+      "station": "IDI15",
+      "lat": 43.982975,
+      "lon": -112.453,
+      "n_periods": 30,
+      "nrms": 6.393454273901527,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5440275790001579
+    },
+    {
+      "station": "IDI16",
+      "lat": 43.9686,
+      "lon": -111.473,
+      "n_periods": 30,
+      "nrms": 1.526669846993678,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5442011370000728
+    },
+    {
+      "station": "IDJ15",
+      "lat": 43.4197,
+      "lon": -112.432,
+      "n_periods": 30,
+      "nrms": 5.7537161411193205,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5326972270004262
+    },
+    {
+      "station": "IDJ16",
+      "lat": 43.3319,
+      "lon": -111.557,
+      "n_periods": 30,
+      "nrms": 0.9880045251295015,
+      "iters": 9,
+      "converged": true,
+      "time_s": 0.13949363900019307
+    },
+    {
+      "station": "IDK15",
+      "lat": 42.717856,
+      "lon": -112.38,
+      "n_periods": 30,
+      "nrms": 1.3502736217218663,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5570582609998382
+    },
+    {
+      "station": "IDK16",
+      "lat": 42.6996,
+      "lon": -111.425,
+      "n_periods": 30,
+      "nrms": 1.4548527233679374,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5404064439999274
+    },
+    {
+      "station": "MTG15",
+      "lat": 45.178225,
+      "lon": -112.52375,
+      "n_periods": 30,
+      "nrms": 0.975238053182467,
+      "iters": 12,
+      "converged": true,
+      "time_s": 0.19800254799974937
+    },
+    {
+      "station": "MTG16",
+      "lat": 45.24855,
+      "lon": -111.615,
+      "n_periods": 28,
+      "nrms": 2.323387102375368,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5271523000001253
+    },
+    {
+      "station": "MTG17",
+      "lat": 45.269325,
+      "lon": -110.455,
+      "n_periods": 30,
+      "nrms": 3.1977557364909623,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5408460090002336
+    },
+    {
+      "station": "MTG18",
+      "lat": 45.3061,
+      "lon": -109.518,
+      "n_periods": 30,
+      "nrms": 0.9899078623972102,
+      "iters": 5,
+      "converged": true,
+      "time_s": 0.07250334599984853
+    },
+    {
+      "station": "MTG19",
+      "lat": 45.1879,
+      "lon": -108.91,
+      "n_periods": 30,
+      "nrms": 3.4983104573834827,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5601551039999322
+    },
+    {
+      "station": "MTH15",
+      "lat": 44.6776,
+      "lon": -112.485,
+      "n_periods": 30,
+      "nrms": 2.7900751607337706,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5475743850001891
+    },
+    {
+      "station": "MTH16",
+      "lat": 44.6047,
+      "lon": -111.565,
+      "n_periods": 30,
+      "nrms": 2.6715159054493762,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5507619209997756
+    },
+    {
+      "station": "WYH18",
+      "lat": 44.6759,
+      "lon": -109.665,
+      "n_periods": 30,
+      "nrms": 3.456699061634546,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.560121737999907
+    },
+    {
+      "station": "WYH19",
+      "lat": 44.5487,
+      "lon": -108.865,
+      "n_periods": 30,
+      "nrms": 0.9968230681297482,
+      "iters": 11,
+      "converged": true,
+      "time_s": 0.17585730199971294
+    },
+    {
+      "station": "WYI17",
+      "lat": 43.921,
+      "lon": -110.574,
+      "n_periods": 30,
+      "nrms": 2.81787435956209,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5434829950004314
+    },
+    {
+      "station": "WYI18",
+      "lat": 43.6924,
+      "lon": -109.616,
+      "n_periods": 30,
+      "nrms": 4.188918503413051,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5457947800000511
+    },
+    {
+      "station": "WYI19",
+      "lat": 43.8936,
+      "lon": -108.799,
+      "n_periods": 30,
+      "nrms": 1.7321931988834538,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5310653470000943
+    },
+    {
+      "station": "WYJ17",
+      "lat": 43.2694,
+      "lon": -110.64,
+      "n_periods": 30,
+      "nrms": 1.3958019416869494,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.534652737000215
+    },
+    {
+      "station": "WYJ18",
+      "lat": 43.3027,
+      "lon": -109.955,
+      "n_periods": 30,
+      "nrms": 4.624107377289873,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5481600929997512
+    },
+    {
+      "station": "WYJ19",
+      "lat": 43.2326,
+      "lon": -108.89,
+      "n_periods": 30,
+      "nrms": 1.3277521069388405,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5305152340001769
+    },
+    {
+      "station": "WYK17",
+      "lat": 42.7674,
+      "lon": -110.501,
+      "n_periods": 30,
+      "nrms": 1.6935154418852159,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5384322410000095
+    },
+    {
+      "station": "WYK18",
+      "lat": 42.6959,
+      "lon": -109.651,
+      "n_periods": 30,
+      "nrms": 0.988798760037692,
+      "iters": 10,
+      "converged": true,
+      "time_s": 0.16224001000000499
+    },
+    {
+      "station": "WYK19",
+      "lat": 42.7201,
+      "lon": -108.723,
+      "n_periods": 30,
+      "nrms": 1.996622640700088,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5409120960002838
+    },
+    {
+      "station": "WYYS1",
+      "lat": 44.7185,
+      "lon": -110.638,
+      "n_periods": 30,
+      "nrms": 4.0214749356119945,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5460651929997766
+    },
+    {
+      "station": "WYYS2",
+      "lat": 44.39635,
+      "lon": -110.577,
+      "n_periods": 30,
+      "nrms": 4.128441937418579,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.5481318910001391
+    },
+    {
+      "station": "WYYS3",
+      "lat": 44.5607,
+      "lon": -110.315,
+      "n_periods": 30,
+      "nrms": 2.085709985479075,
+      "iters": 30,
+      "converged": false,
+      "time_s": 0.545258735999596
+    }
+  ]
+}
