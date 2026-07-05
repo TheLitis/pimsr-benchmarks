@@ -183,3 +183,47 @@ Even with calibrated noise and fine-tuning, a 1D network cannot express
 lateral structure: nRMS 6.14 vs 2.6 for per-station optimisation. The residual
 gap is structural, confirming the MVP-2 spec decision to move to 2D meshes
 (SimPEG 2D MT forward + conv-2D inversion) as the next milestone.
+
+---
+
+# 2D milestone: SimPEG forward + U-Net section inversion
+
+Full pipeline executed on the self-hosted runner: 12,000 stochastic 2D
+sections (SimPEG TE-mode, run 28753497334, ~3.5 h on 8 workers) ->
+auto-triggered GPU training (run 28757073497, 80 epochs, best at ~ep. 20 by
+val NLL) -> benchmark below.
+
+## Components (all committed)
+
+- `pimsr-geogen.section2d`: stochastic sections — undulating interfaces,
+  normal faults, finite scenario lenses on a 64 x 48 (x, log-depth) grid.
+- `pimsr-forward.mt2d`: TE-mode `Simulation2DElectricField`, validated
+  against the analytic 1D solution (0.6 % median mismatch).
+- `pimsr-inversion.network2d`: U-Net, pseudo-section (2, 24, 16) ->
+  resistivity section (48, 64) + heteroscedastic sigma + scenario head.
+- CI chain: `pimsr-dataset2d.yml` (parallel shards, Python 3.11) triggers
+  `pimsr-train2d.yml` on success via `workflow_run`.
+
+## Results (500 test sections + real Yellowstone E-W profile)
+
+| Metric | 2D U-Net | Best 1D reference |
+|---|---|---|
+| Section RMSE (log10 rho, full 48x64 image) | 0.646 | 0.545 (per-column task, easier) |
+| 1-sigma coverage (ideal 0.68) | 0.75 | 0.77 |
+| Real-profile physics nRMS | 6.54 | 6.14 (1D fine-tuned) / 2.59 (hybrid) |
+| Scenario accuracy | 0.26 | 0.71 (1D) |
+
+## Honest read
+
+- **The 2D pipeline works end-to-end** and predicts full sections with
+  calibrated uncertainty (0.75 coverage) in a single forward pass.
+- **It does not yet beat 1D on the real profile** (6.54 vs 6.14). Three
+  identified causes: (a) 6x less training data than the 1D model (10k vs
+  60k); (b) no real-data fine-tuning stage yet — the 1D number is after
+  fine-tuning, the raw pretrained 1D was 8.36; (c) val NLL divergence after
+  epoch 20 (sigma overfit) — earlier stopping or sigma warm-up would help.
+- **Scenario head underperforms** (0.26): scenario lenses occupy a small
+  fraction of each section; needs class-balanced loss or larger lenses.
+- Next steps in order of expected value: real-profile fine-tuning for the 2D
+  net (analogous to the 1D anchored fine-tune, which cut nRMS by 27 %),
+  60k-section dataset, sigma warm-up schedule.
