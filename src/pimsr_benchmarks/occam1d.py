@@ -75,6 +75,7 @@ def occam1d_invert(
     target_nrms: float = 1.0,
     mu0: float = 1.0e3,
     mu_cool: float = 0.65,
+    initial_model: np.ndarray | None = None,
 ) -> OccamResult:
     """Invert one MT sounding for a smooth 1D resistivity profile.
 
@@ -100,9 +101,18 @@ def occam1d_invert(
     for i in range(n_cells - 1):
         R[i, i], R[i, i + 1] = -1.0, 1.0
 
-    # Half-space starting model from the mean apparent resistivity.
-    m = np.full(n_cells, float(np.mean(obs_log10_rho_a)))
-    mu = mu0
+    if initial_model is not None:
+        # Warm start (e.g. from the neural inverter). A structured starting
+        # model needs far less regularisation cooling, so begin closer to the
+        # final trade-off point.
+        m = np.clip(np.asarray(initial_model, dtype=float).copy(), -1.0, 5.0)
+        if m.size != n_cells:
+            raise ValueError(f"initial_model size {m.size} != mesh cells {n_cells}")
+        mu = mu0 * mu_cool**6
+    else:
+        # Half-space starting model from the mean apparent resistivity.
+        m = np.full(n_cells, float(np.mean(obs_log10_rho_a)))
+        mu = mu0
     history: list[float] = []
     converged = False
 
