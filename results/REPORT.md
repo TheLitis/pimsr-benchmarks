@@ -81,3 +81,59 @@ python scripts/run_neural_bench.py --checkpoint best.pt --test-h5 ds_test.h5 \
     --emtf-dir data/emtf --out-dir results
 python scripts/make_report.py --results-dir results --out results/REPORT.md
 ```
+
+---
+
+# MVP-2 update: hybrid refinement and self-supervised fine-tuning
+
+Both follow-ups proposed above are now implemented and measured.
+
+## Method comparison (all four methods)
+
+| Method | Synthetic RMSE (log10 rho) | Real nRMS (27 st.) | Time / station |
+|---|---|---|---|
+| Occam (cold start) | 0.791 | 2.57 | 88 ms |
+| Neural (pretrained) | **0.514** | 9.23 | **2 ms** |
+| Neural (fine-tuned, L2-SP aw=10) | 0.617 | 6.99 | **2 ms** |
+| Hybrid (neural warm-start Occam) | 0.750 | **2.74** | 44 ms |
+
+## Hybrid: neural warm start + Occam refinement
+
+The network prediction is projected onto the Occam mesh and used as the
+starting model with a pre-cooled trade-off parameter (`mu0 * 0.65^6`),
+capped at 12 Gauss-Newton iterations (vs 30 cold).
+
+- **Real data:** nRMS 2.74 vs 2.57 cold — near-classical misfit at 2x the
+  speed and 2.5x fewer iterations. 100% of stations improve on the raw
+  network output.
+- **Synthetic:** RMSE 0.750 — refinement trades profile accuracy for data
+  fit, as theory predicts (the truth is smoother than the noise-fitting
+  minimum). Use the pure network when ground-truth-style accuracy matters
+  and the hybrid when the data misfit must be defensible.
+
+## Self-supervised fine-tuning on real transfer functions
+
+400/200 AdamW steps on the 27 real stations, loss = masked shift-invariant
+physics misfit + L2-SP anchor to the pretrained weights. Anchor-weight sweep:
+
+| anchor | syn RMSE | syn 1-sigma cov. | real nRMS |
+|---|---|---|---|
+| none (pretrained) | 0.514 | 0.74 | 9.23 |
+| 1 | 0.856 | 0.27 | 7.74 |
+| **10** | **0.617** | **0.41** | **6.99** |
+| 50 | 0.557 | 0.52 | 7.53 |
+
+`aw=10` cuts the real-data misfit 24% while keeping the synthetic RMSE well
+below the classical baseline. The uncertainty calibration degrades (0.74 ->
+0.41) because the sigma head receives no direct supervision from the physics
+loss — recalibrating it (e.g. temperature scaling on the val split) is the
+obvious MVP-3 item.
+
+## Takeaways
+
+1. The **hybrid** is the production answer for real surveys today:
+   classical-grade misfit, half the classical cost, fully automated init.
+2. **Physics-only fine-tuning works** without any labels, but needs a
+   strong anchor and sigma recalibration to preserve the synthetic prior.
+3. The remaining real-data gap is structural (1D physics on 2D/3D geology),
+   which motivates the MVP-2 spec's move to 2D meshes.

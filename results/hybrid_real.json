@@ -1,0 +1,204 @@
+{
+  "method": "hybrid",
+  "dataset": "USArray EMTF Yellowstone box",
+  "n_stations": 27,
+  "nrms": {
+    "mean": 2.741764972982978,
+    "median": 2.113754804881758,
+    "p90": 5.1873958968439124,
+    "std": 1.7124472698050959,
+    "n": 27
+  },
+  "converged_frac": 0.18518518518518517,
+  "stations": [
+    {
+      "station": "IDI15",
+      "nrms": 6.694021318337011,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2214335819999178
+    },
+    {
+      "station": "IDI16",
+      "nrms": 1.545437933849557,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.22186133900049754
+    },
+    {
+      "station": "IDJ15",
+      "nrms": 5.794538174352423,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2235964640003658
+    },
+    {
+      "station": "IDJ16",
+      "nrms": 0.8494613812199027,
+      "iters": 8,
+      "converged": true,
+      "time_s": 0.1972304629998689
+    },
+    {
+      "station": "IDK15",
+      "nrms": 1.3625891079266101,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.23079901999972208
+    },
+    {
+      "station": "IDK16",
+      "nrms": 1.4938738186163576,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21160169700033293
+    },
+    {
+      "station": "MTG15",
+      "nrms": 0.9243257527244095,
+      "iters": 10,
+      "converged": true,
+      "time_s": 0.16358336600023904
+    },
+    {
+      "station": "MTG16",
+      "nrms": 2.3501107512014263,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21047195000028296
+    },
+    {
+      "station": "MTG17",
+      "nrms": 3.1979150235147342,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2144101789999695
+    },
+    {
+      "station": "MTG18",
+      "nrms": 0.9055664407518093,
+      "iters": 5,
+      "converged": true,
+      "time_s": 0.0722664770000847
+    },
+    {
+      "station": "MTG19",
+      "nrms": 3.502645933110786,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21351718799996888
+    },
+    {
+      "station": "MTH15",
+      "nrms": 2.792819636109219,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2103615650003121
+    },
+    {
+      "station": "MTH16",
+      "nrms": 6.479470374387257,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21547805800037168
+    },
+    {
+      "station": "WYH18",
+      "nrms": 3.457722391229387,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21289193099983095
+    },
+    {
+      "station": "WYH19",
+      "nrms": 0.9794824954476421,
+      "iters": 5,
+      "converged": true,
+      "time_s": 0.07209196999974665
+    },
+    {
+      "station": "WYI17",
+      "nrms": 2.8360629461103595,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2121704099999988
+    },
+    {
+      "station": "WYI18",
+      "nrms": 4.374193242340705,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2165813360006723
+    },
+    {
+      "station": "WYI19",
+      "nrms": 1.7730210951938645,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21363586300049064
+    },
+    {
+      "station": "WYJ17",
+      "nrms": 1.4066142585764596,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2124884459999521
+    },
+    {
+      "station": "WYJ18",
+      "nrms": 4.782634378504902,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21119358400028432
+    },
+    {
+      "station": "WYJ19",
+      "nrms": 1.359748823637642,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.20712925899988477
+    },
+    {
+      "station": "WYK17",
+      "nrms": 1.6960032021664175,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21561449599994376
+    },
+    {
+      "station": "WYK18",
+      "nrms": 0.9922658521526063,
+      "iters": 4,
+      "converged": true,
+      "time_s": 0.06822183399981441
+    },
+    {
+      "station": "WYK19",
+      "nrms": 2.036568758588156,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.25316046300031303
+    },
+    {
+      "station": "WYYS1",
+      "nrms": 4.188131453177029,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.21942965200014442
+    },
+    {
+      "station": "WYYS2",
+      "nrms": 4.13867492243198,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.2214657829999851
+    },
+    {
+      "station": "WYYS3",
+      "nrms": 2.113754804881758,
+      "iters": 12,
+      "converged": false,
+      "time_s": 0.22185982199971477
+    }
+  ]
+}

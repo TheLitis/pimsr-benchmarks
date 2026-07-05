@@ -1,0 +1,284 @@
+{
+  "method": "pimsr-neural",
+  "dataset": "USArray EMTF Yellowstone box",
+  "n_stations": 27,
+  "nrms": {
+    "mean": 6.986097852583421,
+    "median": 5.786732415641604,
+    "p90": 11.8625970653324,
+    "std": 3.5104440396006615,
+    "n": 27
+  },
+  "stations": [
+    {
+      "station": "IDI15",
+      "lat": 43.982975,
+      "lon": -112.453,
+      "n_periods_in_band": 9,
+      "nrms": 11.603485036930472,
+      "scenario": 0,
+      "mean_sigma": 0.37855297327041626,
+      "time_s": 0.0024907269998948323
+    },
+    {
+      "station": "IDI16",
+      "lat": 43.9686,
+      "lon": -111.473,
+      "n_periods_in_band": 9,
+      "nrms": 9.861724237523733,
+      "scenario": 4,
+      "mean_sigma": 0.41879206895828247,
+      "time_s": 0.0020940099993822514
+    },
+    {
+      "station": "IDJ15",
+      "lat": 43.4197,
+      "lon": -112.432,
+      "n_periods_in_band": 9,
+      "nrms": 8.842306151268449,
+      "scenario": 2,
+      "mean_sigma": 0.24735531210899353,
+      "time_s": 0.002043706999756978
+    },
+    {
+      "station": "IDJ16",
+      "lat": 43.3319,
+      "lon": -111.557,
+      "n_periods_in_band": 9,
+      "nrms": 9.164899731406141,
+      "scenario": 4,
+      "mean_sigma": 0.442889928817749,
+      "time_s": 0.002147426999727031
+    },
+    {
+      "station": "IDK15",
+      "lat": 42.717856,
+      "lon": -112.38,
+      "n_periods_in_band": 9,
+      "nrms": 3.7553372262163593,
+      "scenario": 4,
+      "mean_sigma": 0.461431086063385,
+      "time_s": 0.00211500800014619
+    },
+    {
+      "station": "IDK16",
+      "lat": 42.6996,
+      "lon": -111.425,
+      "n_periods_in_band": 9,
+      "nrms": 16.747939261636084,
+      "scenario": 4,
+      "mean_sigma": 0.5567160844802856,
+      "time_s": 0.002095085000291874
+    },
+    {
+      "station": "MTG15",
+      "lat": 45.178225,
+      "lon": -112.52375,
+      "n_periods_in_band": 9,
+      "nrms": 5.415250153171727,
+      "scenario": 4,
+      "mean_sigma": 0.49214357137680054,
+      "time_s": 0.0021908779999648686
+    },
+    {
+      "station": "MTG16",
+      "lat": 45.24855,
+      "lon": -111.615,
+      "n_periods_in_band": 9,
+      "nrms": 6.330859206243084,
+      "scenario": 3,
+      "mean_sigma": 0.25103265047073364,
+      "time_s": 0.0025137840002571465
+    },
+    {
+      "station": "MTG17",
+      "lat": 45.269325,
+      "lon": -110.455,
+      "n_periods_in_band": 9,
+      "nrms": 12.251265107935287,
+      "scenario": 2,
+      "mean_sigma": 0.14509373903274536,
+      "time_s": 0.002319901999726426
+    },
+    {
+      "station": "MTG18",
+      "lat": 45.3061,
+      "lon": -109.518,
+      "n_periods_in_band": 9,
+      "nrms": 5.7860313306479085,
+      "scenario": 4,
+      "mean_sigma": 0.39923742413520813,
+      "time_s": 0.002133343000423338
+    },
+    {
+      "station": "MTG19",
+      "lat": 45.1879,
+      "lon": -108.91,
+      "n_periods_in_band": 9,
+      "nrms": 5.174095665886121,
+      "scenario": 3,
+      "mean_sigma": 0.35121724009513855,
+      "time_s": 0.0021299070003806264
+    },
+    {
+      "station": "MTH15",
+      "lat": 44.6776,
+      "lon": -112.485,
+      "n_periods_in_band": 9,
+      "nrms": 3.200216171252969,
+      "scenario": 3,
+      "mean_sigma": 0.24862845242023468,
+      "time_s": 0.002040549000412284
+    },
+    {
+      "station": "MTH16",
+      "lat": 44.6047,
+      "lon": -111.565,
+      "n_periods_in_band": 9,
+      "nrms": 5.6365059357509955,
+      "scenario": 2,
+      "mean_sigma": 0.19705261290073395,
+      "time_s": 0.002023265000389074
+    },
+    {
+      "station": "WYH18",
+      "lat": 44.6759,
+      "lon": -109.665,
+      "n_periods_in_band": 9,
+      "nrms": 4.139966330347976,
+      "scenario": 0,
+      "mean_sigma": 0.2007511556148529,
+      "time_s": 0.002001138999730756
+    },
+    {
+      "station": "WYH19",
+      "lat": 44.5487,
+      "lon": -108.865,
+      "n_periods_in_band": 9,
+      "nrms": 6.61743621982379,
+      "scenario": 3,
+      "mean_sigma": 0.3908354640007019,
+      "time_s": 0.0019984130003649625
+    },
+    {
+      "station": "WYI17",
+      "lat": 43.921,
+      "lon": -110.574,
+      "n_periods_in_band": 9,
+      "nrms": 6.071031890967397,
+      "scenario": 4,
+      "mean_sigma": 0.42393237352371216,
+      "time_s": 0.001954334999936691
+    },
+    {
+      "station": "WYI18",
+      "lat": 43.6924,
+      "lon": -109.616,
+      "n_periods_in_band": 9,
+      "nrms": 6.988999437257741,
+      "scenario": 4,
+      "mean_sigma": 0.47722527384757996,
+      "time_s": 0.002086133999910089
+    },
+    {
+      "station": "WYI19",
+      "lat": 43.8936,
+      "lon": -108.799,
+      "n_periods_in_band": 9,
+      "nrms": 5.786732415641604,
+      "scenario": 3,
+      "mean_sigma": 0.3473312258720398,
+      "time_s": 0.00191326799995295
+    },
+    {
+      "station": "WYJ17",
+      "lat": 43.2694,
+      "lon": -110.64,
+      "n_periods_in_band": 9,
+      "nrms": 2.8234220770395564,
+      "scenario": 4,
+      "mean_sigma": 0.4103907346725464,
+      "time_s": 0.0019275200002084603
+    },
+    {
+      "station": "WYJ18",
+      "lat": 43.3027,
+      "lon": -109.955,
+      "n_periods_in_band": 9,
+      "nrms": 8.476724929242218,
+      "scenario": 3,
+      "mean_sigma": 0.41782134771347046,
+      "time_s": 0.0019078499999523046
+    },
+    {
+      "station": "WYJ19",
+      "lat": 43.2326,
+      "lon": -108.89,
+      "n_periods_in_band": 9,
+      "nrms": 3.4659200132609205,
+      "scenario": 4,
+      "mean_sigma": 0.2993837594985962,
+      "time_s": 0.0019295150004836614
+    },
+    {
+      "station": "WYK17",
+      "lat": 42.7674,
+      "lon": -110.501,
+      "n_periods_in_band": 9,
+      "nrms": 4.297593341758939,
+      "scenario": 0,
+      "mean_sigma": 0.26742926239967346,
+      "time_s": 0.0019475359995340114
+    },
+    {
+      "station": "WYK18",
+      "lat": 42.6959,
+      "lon": -109.651,
+      "n_periods_in_band": 9,
+      "nrms": 5.001859193153872,
+      "scenario": 4,
+      "mean_sigma": 0.29230669140815735,
+      "time_s": 0.002037094000115758
+    },
+    {
+      "station": "WYK19",
+      "lat": 42.7201,
+      "lon": -108.723,
+      "n_periods_in_band": 9,
+      "nrms": 3.1523674623096443,
+      "scenario": 0,
+      "mean_sigma": 0.23374149203300476,
+      "time_s": 0.001915447000101267
+    },
+    {
+      "station": "WYYS1",
+      "lat": 44.7185,
+      "lon": -110.638,
+      "n_periods_in_band": 9,
+      "nrms": 4.156156538956491,
+      "scenario": 4,
+      "mean_sigma": 0.7052004337310791,
+      "time_s": 0.0019745039999179426
+    },
+    {
+      "station": "WYYS2",
+      "lat": 44.39635,
+      "lon": -110.577,
+      "n_periods_in_band": 9,
+      "nrms": 9.453924794139333,
+      "scenario": 4,
+      "mean_sigma": 0.4039808511734009,
+      "time_s": 0.002001884000492282
+    },
+    {
+      "station": "WYYS3",
+      "lat": 44.5607,
+      "lon": -110.315,
+      "n_periods_in_band": 9,
+      "nrms": 14.422592159983559,
+      "scenario": 4,
+      "mean_sigma": 0.5972346663475037,
+      "time_s": 0.001956461999725434
+    }
+  ]
+}
