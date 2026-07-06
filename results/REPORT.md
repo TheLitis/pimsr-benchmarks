@@ -227,3 +227,46 @@ val NLL) -> benchmark below.
 - Next steps in order of expected value: real-profile fine-tuning for the 2D
   net (analogous to the 1D anchored fine-tune, which cut nRMS by 27 %),
   60k-section dataset, sigma warm-up schedule.
+
+---
+
+# 2D fine-tune: the 2D net now leads all pure-neural methods on real data
+
+Applied the proven 1D recipe to the U-Net (`pimsr_inversion.finetune2d`,
+committed): per-station-column physics chi^2 (masked to each station's
+measured band, static-shift invariant) + L2-SP anchor + input jitter as
+augmentation for the single-profile training signal. 200 steps, CPU-fast.
+
+## Anchor sweep (real profile nRMS / synthetic RMSE / 1-sigma coverage)
+
+| anchor_weight | Real nRMS | Syn RMSE | Coverage (ideal 0.68) |
+|---|---|---|---|
+| none (baseline) | 6.54 | 0.646 | 0.75 |
+| 30 | 5.30 | 0.650 | 0.73 |
+| 10 | 4.82 | 0.658 | 0.71 |
+| **3 (chosen)** | **4.59** | 0.664 | **0.69** |
+
+## Updated method leaderboard (real Yellowstone profile)
+
+| Method | Real nRMS | Time |
+|---|---|---|
+| Hybrid (neural warm-start + Occam) | 2.59 | 164 ms/st |
+| Classical Occam (cold) | 2.57 | 391 ms/st |
+| **2D U-Net fine-tuned** | **4.59** | ~ms (full section, single pass) |
+| 1D neural fine-tuned | 6.14 | 2 ms/st |
+| 2D U-Net pretrained | 6.54 | ~ms |
+| 1D neural pretrained | 8.36 | 2 ms/st |
+
+## Takeaways
+
+- Fine-tuning cut the 2D real-profile misfit by **30 %** (6.54 -> 4.59) at a
+  negligible synthetic cost (+0.018 RMSE) — and coverage actually moved
+  *toward* ideal (0.75 -> 0.69), unlike the 1D case which needed
+  recalibration after fine-tuning.
+- The 2D net is now the **best single-pass method on real data**, overtaking
+  the fine-tuned 1D net (4.59 vs 6.14) despite 6x less pretraining data —
+  lateral context is worth more than dataset size here.
+- Per-station iterative methods (hybrid/Occam, ~2.6) remain ahead in raw
+  misfit; they optimise each station independently at run time. The
+  remaining 2D gap is the 10k-section dataset and the sigma-overfit early
+  stopping — both queued (60k dataset, sigma warm-up).
