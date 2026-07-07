@@ -384,3 +384,58 @@ not method), sigma regularisation for long training, and scenario-head
 architecture. The 1D-vs-2D metric mismatch documented here should also
 be fixed in any future leaderboard by scoring everything with the 2D
 forward.
+
+---
+
+# Unified leaderboard + multi-profile generalisation study
+
+Two long-standing issues fixed in one cycle: (1) every method is now
+scored with the same rigorous 2D-forward shift-invariant nRMS
+(`section_nrms_2d`), ending the 1D-col/2D metric mismatch; (2) the
+models are evaluated on four additional independent USArray E-W
+profiles (G, I, J, K rows) that none of the networks ever saw.
+
+## Unified leaderboard, Yellowstone profile (2D-forward nRMS)
+
+| Rank | Method | 2D nRMS | Time |
+|---|---|---|---|
+| 1 | **U-Net 60k + ft** | **4.47** | ~ms |
+| 2 | U-Net 10k + ft | 4.52 | ~ms |
+| 3 | U-Net 60k pretrained | 4.79 | ~ms |
+| 4 | Cold 2D GN (25 it) | 4.90 | 132 s |
+| 5 | 2D hybrid GN-8 | 5.05 | 41 s |
+| 6 | U-Net 10k pretrained | 5.73 | ~ms |
+| 7 | 1D neural, stitched | 6.49 | 36 ms |
+| 8 | 1D hybrid, stitched | 6.50 | 2.9 s |
+| 9 | 1D Occam, stitched | 7.78 | 7.4 s |
+
+**The old "iterative 1D at ~2.6 dominates" story was a metric artifact.**
+Scored against the true 2D physics of a laterally-coherent section, the
+stitched 1D methods land at 6.5-7.8 — behind every 2D network. The
+fine-tuned U-Net is the genuine overall champion, and the neural nets
+occupy the entire top-3.
+
+## Multi-profile generalisation (mean 2D nRMS over G/I/J/K)
+
+| Method | Mean nRMS | Notes |
+|---|---|---|
+| **U-Net 60k + YS fine-tune** | **4.68** | ft transfers across profiles |
+| U-Net 60k + per-profile self-ft | 4.86 | high variance (4.09-5.79) |
+| U-Net 60k pretrained | 4.94 | solid baseline everywhere |
+| 1D Occam stitched | 6.48 | |
+| 1D neural stitched | 7.29 | |
+
+Two notable findings: the Yellowstone fine-tune **generalises** — it
+improves unseen profiles too (4.94 -> 4.68), meaning it learned regional
+data statistics rather than overfitting one line; and per-profile
+self-fine-tuning is not reliably better than the transferred one,
+confirming that single-profile physics fine-tuning is high-variance.
+
+## Verdict
+
+Physics-informed neural surrogates are not merely "faster with caveats":
+under a fair 2D metric they are the most accurate method available in
+this benchmark, at 4-6 orders of magnitude lower latency than classical
+inversion. A sigma-regularised retraining (quadratic log-sigma penalty,
+committed as --sigma-reg) is running to fix the last known training
+pathology; results will be appended.

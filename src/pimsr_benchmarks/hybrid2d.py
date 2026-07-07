@@ -28,9 +28,24 @@ __all__ = ["assemble_profile", "section_nrms", "refine_section_2d", "Hybrid2DRes
 #: E-W profile at ~44.6N, west to east (same as run_2d_bench).
 PROFILE_IDS = ["MTH15", "MTH16", "WYYS1", "WYYS2", "WYYS3", "WYH18", "WYH19"]
 
+#: All five E-W USArray rows in the region, west to east. "H-YS" is the
+#: original Yellowstone profile; the others are independent test lines.
+PROFILES = {
+    "G": ["MTG15", "MTG16", "MTG17", "MTG18", "MTG19"],
+    "H-YS": PROFILE_IDS,
+    "I": ["IDI15", "IDI16", "WYI17", "WYI18", "WYI19"],
+    "J": ["IDJ15", "IDJ16", "WYJ17", "WYJ18", "WYJ19"],
+    "K": ["IDK15", "IDK16", "WYK17", "WYK18", "WYK19"],
+}
 
-def assemble_profile(emtf_dir: str, freqs: np.ndarray, station_x: np.ndarray):
-    """Interpolate the USArray profile onto the model station grid.
+
+def assemble_profile(
+    emtf_dir: str,
+    freqs: np.ndarray,
+    station_x: np.ndarray,
+    profile_ids: list[str] | None = None,
+):
+    """Interpolate a USArray profile onto the model station grid.
 
     Returns (lr, ph, x_model, x_km): log10 apparent resistivity and phase of
     shape (n_freq, n_station), model station coordinates (km), and the true
@@ -40,7 +55,7 @@ def assemble_profile(emtf_dir: str, freqs: np.ndarray, station_x: np.ndarray):
     for f in glob.glob(f"{emtf_dir}/*.xml"):
         st = parse_emtf_xml(f)
         stations[st.station_id] = st
-    profile = [stations[i] for i in PROFILE_IDS]
+    profile = [stations[i] for i in (profile_ids or PROFILE_IDS)]
 
     periods = 1.0 / freqs
     n_f, n_s = len(freqs), len(station_x)
