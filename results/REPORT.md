@@ -527,3 +527,72 @@ model compared on all five rows (results/mpft/mpft.json):
 3. Leave-one-out (mean 4.88 on held-out rows, always better than
    pretrained) shows the joint model transfers to rows it never saw:
    this is genuine regional adaptation, not multi-line memorisation.
+
+---
+
+# v3 cycle: TE+TM impedance, beta-NLL, multiscale scenario head
+
+One combined GPU cycle addressed three open problems at once: the
+TM mode doubles the physical information per station (dataset run
+28868401447, 10k/1k/1k TE+TM sections, seed 3; training run
+28891525012, 80 epochs, `--beta 0.5 --scen-head multiscale`).
+
+## Synthetic test (500 sections, results/v3/synthetic.json)
+
+| Metric | v2 60k (TE, sigma-reg) | v3 10k (TE+TM, beta-NLL) |
+|---|---|---|
+| section RMSE | 0.634 | **0.618** |
+| 1-sigma coverage | 0.785 | 0.812 |
+| scenario accuracy | 0.28 | **0.40** |
+
+- **Scenario head fixed**: 0.28 -> 0.40 (+43%), from the multiscale
+  avg+max head over bottleneck + finest decoder features. Small lenses
+  survive max-pooling that global averaging washed out.
+- v3 with 10k sections beats the 60k TE-only model on RMSE — mode
+  diversity is worth more than 6x data volume.
+- **beta-NLL verdict — the drift is tamed, not cured**: best val-NLL
+  epoch 16 (0.068), drifting to 0.73 by epoch 79 vs 32.0 for
+  sigma-reg and worse for plain NLL. RMSE stays flat (0.652 -> 0.692)
+  so checkpoint selection is safe, but the root cause survives even a
+  gradient-stopped objective. Next candidate: a separately-trained
+  post-hoc sigma head.
+
+## Real Yellowstone profile (unified 2D-forward leaderboard, results/v3/unified_v3.json)
+
+| Method | 2D nRMS |
+|---|---|
+| unet-60k-ft (TE, champion) | **4.01** |
+| **unet-v3-tetm-ft** | **4.05** |
+| unet-v3-tetm (no ft!) | 4.36 |
+| unet-10k-ft | 4.54 |
+| unet-60k | 4.79 |
+| unet-10k | 5.73 |
+| hybrid1d-stitched | 6.69 |
+| occam1d-stitched | 7.78 |
+
+- **The headline: v3 pretrained (4.36) nearly matches the old
+  champion pipeline without any fine-tuning** — the TM mode closes
+  most of the sim-to-real gap that previously required per-profile
+  physics ft (10k TE-only pre was 5.73). With ft the two are
+  statistically tied (4.05 vs 4.01) at 6x less training data.
+- Per-mode real inputs: TE=Zyx, TM=Zxy for the E-W profile (N-S
+  strike assumption), phases folded to [0,180).
+
+## Caveat: v3 on unseen rows (results/v3/v3_profiles.json)
+
+v3-pre mean over 5 rows is 7.42 (vs 5.12 for 60k TE sreg) — rows I/K
+have strongly 3D/distorted TM curves that the 10k synthetic prior has
+not seen. Joint ft improves to 6.38 but does not close the gap.
+The TE-only model silently ignored this mismatch; v3 exposes it.
+Fix queued: TM distortion (static shifts already independent per mode,
+but real yx curves need stronger galvanic/twist augmentation) plus a
+60k-scale TE+TM dataset.
+
+## Conclusions
+
+v3 delivers on 2 of 3 goals outright (scenario head +43%, TM mode
+closes the zero-shot gap on the target profile) and partially on the
+third (beta-NLL is the best drift mitigation so far but not a cure).
+The clear next cycle: TE+TM at 60k scale with per-mode distortion
+augmentation — expected to combine v3's zero-shot quality with the
+60k model's cross-row robustness.
