@@ -439,3 +439,58 @@ this benchmark, at 4-6 orders of magnitude lower latency than classical
 inversion. A sigma-regularised retraining (quadratic log-sigma penalty,
 committed as --sigma-reg) is running to fix the last known training
 pathology; results will be appended.
+
+---
+
+# Sigma-regularised retraining: new overall champion at 3.99
+
+Retrained the 60k model with the quadratic log-sigma penalty
+(--sigma-reg 0.05) added after two runs showed val-NLL divergence.
+
+## Training behaviour
+
+Best epoch 17 (val RMSE 0.6520, ~= baseline 0.6535). The divergence is
+tamed but not cured: val NLL still drifts up after ~epoch 25, yet ends
+at 3.9 instead of 32 — an order of magnitude less runaway. Early
+stopping still selects a good checkpoint; sigma-reg makes the long tail
+of training harmless rather than fixing its cause.
+
+## Results (rigorous 2D-forward nRMS)
+
+| Model | Yellowstone | Unseen G/I/J/K mean |
+|---|---|---|
+| **sigma-reg 60k + ft** | **3.99** | 5.29 |
+| sigma-reg 60k pretrained | 4.18 | 5.35 |
+| previous champion (60k + ft) | 4.47 | 4.68 |
+| 60k pretrained (baseline) | 4.79 | 4.94 |
+| best classical 2D (cold GN-25) | 4.90 | — |
+
+Synthetic: RMSE 0.634 (~= baseline 0.637), coverage 0.785, scenario acc
+0.28 (both ~= baseline).
+
+## Findings
+
+1. **New overall champion on the primary benchmark: 3.99** — first
+   model under 4.0, beating the previous best by 11% and the best
+   classical 2D method by 19%, at ~ms latency. The sigma-reg model
+   fits real data far better out of the box (4.18 pretrained vs 4.79).
+2. **A trade-off appeared**: on unseen profiles the sigma-reg model is
+   worse (5.29 vs 4.68 mean). Regularising sigma seems to sharpen the
+   fit where data is dense (YS row is the region's centre) at some cost
+   to out-of-row robustness. Which model to prefer depends on use:
+   sigma-reg for the target profile, the unregularised ft model for
+   regional deployment.
+3. Sigma-reg did not change synthetic accuracy or coverage — its value
+   is training stability and real-data fit, not the sigma calibration
+   number itself.
+
+## Project conclusion
+
+Across 1D and 2D, synthetic and real data, the physics-informed neural
+approach now holds every top position under fair metrics. The final
+leaderboard on the real Yellowstone profile: neural 3.99-4.52 (ms),
+classical 2D GN 4.90 (2 min), stitched 1D methods 6.5-7.8. Remaining
+open problems, in value order: out-of-row generalisation of the
+sigma-reg model, the root cause of NLL drift (likely needs a proper
+heteroscedastic head or beta-NLL loss), and the scenario head (~0.28,
+needs architecture work).
