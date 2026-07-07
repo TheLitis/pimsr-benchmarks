@@ -58,7 +58,11 @@ def bench_synthetic(model, ckpt, test_h5: str, n: int) -> dict:
     dt = time.time() - t0
 
     pred = out["log_rho"].numpy()
-    sigma = np.exp(0.5 * out["log_sigma_rho"].numpy())
+    ls = out["log_sigma_rho"].numpy()
+    aff = ckpt.get("sigma_affine2d")
+    if aff:  # post-hoc affine recalibration fitted on the val split
+        ls = aff["a"] * ls + aff["b"]
+    sigma = np.exp(0.5 * ls)
     rmses = np.sqrt(((pred - tgt) ** 2).mean(axis=(1, 2)))
     cov1 = float((np.abs(pred - tgt) < sigma).mean())
     acc = float(
