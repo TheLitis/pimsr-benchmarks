@@ -1,0 +1,10 @@
+{
+ "profile": "H-YS",
+ "modes": "te,tm",
+ "n_params": 192,
+ "n_data_blocks": 84,
+ "occam_rms": 12.24854,
+ "runtime_s": 6.8,
+ "n_iterations": 12,
+ "section_nrms_2d": 4.685
+}

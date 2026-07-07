@@ -1,0 +1,10 @@
+{
+ "profile": "I",
+ "modes": "te,tm",
+ "n_params": 192,
+ "n_data_blocks": 60,
+ "occam_rms": 10.2358,
+ "runtime_s": 5.9,
+ "n_iterations": 11,
+ "section_nrms_2d": 9.263
+}

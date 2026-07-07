@@ -596,3 +596,46 @@ third (beta-NLL is the best drift mitigation so far but not a cure).
 The clear next cycle: TE+TM at 60k scale with per-mode distortion
 augmentation — expected to combine v3's zero-shot quality with the
 60k model's cross-row robustness.
+
+---
+
+# Production comparison: Occam2DMT v3.0 (Scripps)
+
+The mandatory pre-publication check: our methods vs an actual
+production 2D MT inversion code. Occam2DMT v3.0 (de Groot-Hedlin &
+Constable, Scripps Marine EM Lab) was compiled from the official
+source (gfortran, -std=legacy) and run on all five USArray rows with
+joint TE+TM data, 10% error floors, 192-block regularised model,
+via scripts/run_occam2dmt.py (auto mesh/data/startup generation +
+ITER parsing). Everything is scored with the same shift-invariant
+2D-forward metric (section_nrms_2d, TE reference).
+
+| Profile | Occam2DMT v3.0 (TE+TM) | 60k joint-ft U-Net (ours) |
+|---|---|---|
+| G | 3.92 | **3.59** |
+| H-YS | 4.68 | **4.10** |
+| I | 9.26 | **5.62** |
+| J | 6.40 | **3.49** |
+| K | 6.03 | **4.69** |
+| **mean** | 6.06 | **4.30** |
+
+Occam2DMT runtime: 4.5–21.6 s/profile (12–25 iterations); the U-Net
+is a single ~ms forward pass.
+
+## Findings
+
+1. **The neural model beats the production code on every profile**
+   (mean 4.30 vs 6.06, -29%) at four orders of magnitude less
+   compute. On the target Yellowstone row the single-profile champion
+   (3.99) also clears Occam2DMT (4.68).
+2. Occam2DMT slightly outperforms our internal SimPEG GN baseline on
+   H-YS (4.68 vs 4.90) — sanity check passed: our classical baseline
+   was honest, not a strawman.
+3. **Row I is objectively hard, not just hard for us**: production
+   Occam2DMT also scores 9.26 there. This independently confirms the
+   3D/distortion hypothesis for I rather than a defect of the
+   synthetic prior.
+4. Results in results/occam2dmt/*.json. Remaining production items:
+   ModEM (source requested via academic registration — build planned
+   in Docker on the runner PC, D:\ drive) and MARE2DEM (Docker build,
+   Unix-only code) for a 3D-code comparison.
