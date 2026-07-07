@@ -23,8 +23,13 @@ __all__ = ["MTStation", "parse_emtf_xml", "resample_station", "resample_station_
 
 
 def _fold_phase(deg: np.ndarray) -> np.ndarray:
-    """Fold impedance phase into (-90, 90] (180-deg periodic convention)."""
-    return (deg + 90.0) % 180.0 - 90.0
+    """Fold impedance phase into [0, 180) (180-deg periodic convention).
+
+    MT phase normally lives in 0..90; out-of-quadrant values slightly above
+    90 (2D/3D distortion) are preserved near 90 instead of wrapping to -90,
+    which would be far outside the network's training distribution.
+    """
+    return np.mod(deg, 180.0)
 
 
 @dataclass

@@ -74,7 +74,9 @@ def hybrid_1d_section(inv, lr, ph, periods, station_x, x_grid, depth_grid):
     return columns_to_section(np.stack(cols, axis=1), station_x, x_grid)
 
 
-def unet_section(checkpoint, lr, ph):
+def unet_section(checkpoint, lr, ph, modes=None):
+    """Single U-Net pass. For 4-channel (TE+TM) v3 models pass ``modes``
+    from :func:`assemble_profile_modes`."""
     import sys
 
     import torch
@@ -83,7 +85,15 @@ def unet_section(checkpoint, lr, ph):
     from run_2d_hybrid_bench import load_model
 
     model, ckpt = load_model(checkpoint)
-    obs = np.stack([lr, ph / 45.0])[None].astype(np.float32)
+    if model.in_channels == 4:
+        if modes is None:
+            raise ValueError("4-channel checkpoint requires modes=...")
+        obs = np.stack(
+            [modes["lr_te"], modes["ph_te"] / 45.0,
+             modes["lr_tm"], modes["ph_tm"] / 45.0]
+        )[None].astype(np.float32)
+    else:
+        obs = np.stack([lr, ph / 45.0])[None].astype(np.float32)
     obs = (obs - ckpt["stats_mean"]) / ckpt["stats_std"]
     with torch.no_grad():
         out = model(torch.from_numpy(obs.astype(np.float32)))
@@ -99,6 +109,8 @@ def main() -> None:
     ap.add_argument("--ckpt-10k-ft", required=True)
     ap.add_argument("--ckpt-60k", required=True)
     ap.add_argument("--ckpt-60k-ft", required=True)
+    ap.add_argument("--ckpt-v3", default=None, help="TE+TM 4-channel checkpoint")
+    ap.add_argument("--ckpt-v3-ft", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--skip-gn", action="store_true", help="skip slow 2D GN rows")
     args = ap.parse_args()
@@ -143,6 +155,14 @@ def main() -> None:
     add("unet-10k-ft", unet_section(args.ckpt_10k_ft, lr, ph))
     add("unet-60k", unet_section(args.ckpt_60k, lr, ph))
     add("unet-60k-ft", unet_section(args.ckpt_60k_ft, lr, ph))
+
+    if args.ckpt_v3:
+        from pimsr_benchmarks.hybrid2d import assemble_profile_modes
+
+        modes = assemble_profile_modes(args.emtf_dir, freqs, station_x)
+        add("unet-v3-tetm", unet_section(args.ckpt_v3, lr, ph, modes=modes))
+        if args.ckpt_v3_ft:
+            add("unet-v3-tetm-ft", unet_section(args.ckpt_v3_ft, lr, ph, modes=modes))
 
     # ---- 2D iterative ----------------------------------------------------
     if not args.skip_gn:

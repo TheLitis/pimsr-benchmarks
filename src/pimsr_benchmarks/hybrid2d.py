@@ -23,7 +23,13 @@ import numpy as np
 
 from .emtf import parse_emtf_xml, resample_station
 
-__all__ = ["assemble_profile", "section_nrms", "refine_section_2d", "Hybrid2DResult"]
+__all__ = [
+    "assemble_profile",
+    "assemble_profile_modes",
+    "section_nrms",
+    "refine_section_2d",
+    "Hybrid2DResult",
+]
 
 #: E-W profile at ~44.6N, west to east (same as run_2d_bench).
 PROFILE_IDS = ["MTH15", "MTH16", "WYYS1", "WYYS2", "WYYS3", "WYH18", "WYH19"]
@@ -71,6 +77,41 @@ def assemble_profile(
     lr = np.stack([np.interp(x_model, x_km, lr_st[i]) for i in range(n_f)])
     ph = np.stack([np.interp(x_model, x_km, ph_st[i]) for i in range(n_f)])
     return lr, ph, x_model, x_km
+
+
+def assemble_profile_modes(
+    emtf_dir: str,
+    freqs: np.ndarray,
+    station_x: np.ndarray,
+    profile_ids: list[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """Per-mode variant of :func:`assemble_profile` for v3 4-channel nets.
+
+    Returns ``{"lr_te", "ph_te", "lr_tm", "ph_tm", "x_model", "x_km"}``.
+    """
+    from .emtf import resample_station_modes
+
+    stations = {}
+    for f in glob.glob(f"{emtf_dir}/*.xml"):
+        st = parse_emtf_xml(f)
+        stations[st.station_id] = st
+    profile = [stations[i] for i in (profile_ids or PROFILE_IDS)]
+
+    periods = 1.0 / freqs
+    n_f, n_s = len(freqs), len(station_x)
+
+    lon = np.array([s.longitude for s in profile])
+    x_km = (lon - lon.min()) * 111.0 * np.cos(np.radians(44.6))
+    x_model = np.linspace(x_km.min(), x_km.max(), n_s)
+
+    out: dict[str, np.ndarray] = {"x_model": x_model, "x_km": x_km}
+    st_modes = [resample_station_modes(st, periods) for st in profile]
+    for key in ("lr_te", "ph_te", "lr_tm", "ph_tm"):
+        arr = np.stack([m[key] for m in st_modes], axis=1)  # (n_f, n_prof)
+        out[key] = np.stack(
+            [np.interp(x_model, x_km, arr[i]) for i in range(n_f)]
+        )
+    return out
 
 
 def section_nrms(

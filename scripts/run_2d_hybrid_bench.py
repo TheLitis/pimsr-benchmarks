@@ -33,14 +33,7 @@ from pimsr_inversion.network2d import PimsrNet2D
 
 def load_model(path: str):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model = PimsrNet2D(
-        n_freq=int(ckpt["n_freq"]),
-        n_stations=int(ckpt["n_stations"]),
-        n_depth=int(ckpt["n_depth"]),
-        n_x=int(ckpt["n_x"]),
-        n_scenarios=int(ckpt["n_scenarios"]),
-    )
-    model.load_state_dict(ckpt["model_state"])
+    model = PimsrNet2D.from_checkpoint(ckpt)
     model.eval()
     return model, ckpt
 
