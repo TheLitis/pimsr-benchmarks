@@ -334,3 +334,53 @@ lever. The remaining gap to iterative methods is structural (single pass
 vs per-station optimisation). The highest-value next step is the 2D
 hybrid: U-Net warm-start + a few SimPEG Gauss-Newton iterations, which
 in the 1D case closed the gap entirely at 2.4x the classical speed.
+
+---
+
+# 2D hybrid experiment: GN refinement does NOT transfer to 2D
+
+Built `pimsr_benchmarks.hybrid2d`: U-Net warm-start + SimPEG 2D TE
+Gauss-Newton refinement (reference-model regularisation toward the net
+prediction, per-station static-shift correction against the starting
+model, beta cooling). Also added `section_nrms_2d` — the rigorous
+2D-forward misfit (shift-invariant, same weights as the 1D metric),
+which is the fair score for 2D methods.
+
+## Results, real Yellowstone profile (2D-forward nRMS)
+
+| Method | 2D nRMS | Wall time |
+|---|---|---|
+| **U-Net 60k + real-profile ft** | **4.47** | ~ms |
+| U-Net 60k pretrained | 4.79 | ~ms |
+| Cold GN (25 it, control) | 5.15 | 111 s |
+| Hybrid GN-8 (best sweep cfg) | 4.91 | 39 s |
+| Hybrid GN-25 | 6.85 | 110 s |
+
+## Honest findings
+
+1. **The 1D hybrid recipe did not transfer to 2D.** GN refinement makes
+   the warm start *worse* (4.79 -> 4.91 at 8 iters; 6.85 at 25). More
+   iterations = more damage: phi_d keeps falling while the shift-
+   invariant score rises, i.e. the inversion spends its freedom fitting
+   per-station static offsets and noise, not structure. The static-shift
+   pre-correction helped but did not fix this: with only 7 stations and
+   2 x 24 data points each, the 2D GN problem is badly underdetermined.
+2. **Note the metric asymmetry**: on the per-column 1D metric cold GN
+   looks better (5.64) than warm (8.00) — but the per-column metric is
+   itself biased toward laterally-smooth sections. On the rigorous 2D
+   metric every GN variant loses to the neural net.
+3. **New champion, properly measured: fine-tuned 2D U-Net at 4.47**
+   (2D-forward metric). The earlier 1D-col numbers (4.59 for the 10k
+   model) are not directly comparable to iterative 1D methods' 2.6 —
+   those fit each station independently, which the 2D forward cannot
+   reproduce for a laterally-coherent section.
+
+## Where this leaves the project
+
+The neural path (pretrain + physics fine-tune) is the strongest 2D
+method we have; classical 2D refinement on 7 sparse stations hurts more
+than it helps. Remaining levers: more stations / denser profiles (data,
+not method), sigma regularisation for long training, and scenario-head
+architecture. The 1D-vs-2D metric mismatch documented here should also
+be fixed in any future leaderboard by scoring everything with the 2D
+forward.
