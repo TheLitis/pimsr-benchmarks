@@ -1,0 +1,10 @@
+{
+ "code": "ModEM Mod2DMT (open-source, NLCG)",
+ "profile": "G",
+ "n_data": 192,
+ "error_floor": 0.1,
+ "iterations": 80,
+ "modem_final_rms": 1.063699,
+ "section_nrms_2d": 5.64735724381233,
+ "runtime_s": 184.3
+}

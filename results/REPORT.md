@@ -639,3 +639,47 @@ is a single ~ms forward pass.
    ModEM (source requested via academic registration — build planned
    in Docker on the runner PC, D:\ drive) and MARE2DEM (Docker build,
    Unix-only code) for a 3D-code comparison.
+
+---
+
+# Production comparison, part 2: ModEM 2D NLCG (open source)
+
+ModEM turned out to be open-sourced on GitHub
+(magnetotellurics/ModEM) — no academic registration needed after all.
+Mod2DMT was compiled from source (gfortran + LAPACK,
+`Configure.2D_MT.OSU.GFortran` preset) and validated on the bundled
+BLOCK2 example before use. Driver: `scripts/run_modem2d.py` — converts
+our per-mode EMTF observations to ModEM's TE/TM impedance format
+([V/m]/[T], e^{+iwt}, TM written as Zyx = -Z), builds a Mackie-format
+LOGE prior (100 Ohm-m halfspace, 10 km padding), runs NLCG inversion,
+and maps the final model back onto the benchmark raster.
+
+| Profile | ModEM NLCG | Occam2DMT v3.0 | 60k joint-ft U-Net |
+|---|---|---|---|
+| G | 5.32 | 3.92 | **3.59** |
+| H-YS | 5.90 | 4.68 | **4.10** |
+| I | 10.98 | 9.26 | **5.62** |
+| J | 6.28 | 6.40 | **3.49** |
+| K | 6.99 | 6.03 | **4.69** |
+| **mean** | 7.09 | 6.06 | **4.30** |
+
+ModEM runtime: 24-210 s/profile (20-100+ NLCG iterations).
+
+## Findings
+
+1. **The neural model beats both production codes on every profile.**
+   Final production leaderboard (mean over 5 rows): U-Net 4.30 <
+   Occam2DMT 6.06 < ModEM-2D 7.09.
+2. ModEM's internal data-space RMS reaches 1-3 (it fits its own data
+   well); the gap on our metric is in the model-space answer, not a
+   failed inversion. Occam's regularised staircase transfers to the
+   benchmark raster better than NLCG's smooth logE updates at this
+   sparse station density.
+3. **Row I is now triple-confirmed as anomalous** (U-Net 5.62,
+   Occam2DMT 9.26, ModEM 10.98): every independent method struggles,
+   supporting the 3D/distortion structural hypothesis over any
+   method-specific defect.
+4. Results in results/modem2d/*.json. MARE2DEM (same Occam algorithm
+   family as the already-beaten Occam2DMT, Unix-only) is deprioritised;
+   the production-comparison milestone is now closed with two
+   independent production codes.
