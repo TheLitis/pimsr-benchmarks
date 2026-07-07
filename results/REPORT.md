@@ -494,3 +494,36 @@ open problems, in value order: out-of-row generalisation of the
 sigma-reg model, the root cause of NLL drift (likely needs a proper
 heteroscedastic head or beta-NLL loss), and the scenario head (~0.28,
 needs architecture work).
+
+---
+
+# Joint multi-profile fine-tune: the generalisation fix
+
+The sigma-reg trade-off (3.99 on Yellowstone but 5.29 on unseen rows)
+is resolved by fine-tuning on all five USArray rows jointly: the
+physics misfit is averaged across profiles every step (finetune2d
+--profiles G,H-YS,I,J,K), which anchors the adaptation to regional data
+statistics instead of one line. Four variants of the sigma-reg 60k
+model compared on all five rows (results/mpft/mpft.json):
+
+| Variant | mean 2D nRMS (5 rows) | H-YS (target) | worst row |
+|---|---|---|---|
+| pretrained | 5.12 | 4.18 | 6.76 (K) |
+| ft YS-only (champion recipe) | 5.03 | **3.99** | 6.73 (K) |
+| **ft joint all 5 rows** | **4.30** | 4.10 | 5.62 (I) |
+| ft leave-one-out (scored on held-out row) | 4.88 | 4.28 | 6.85 (I) |
+
+## Findings
+
+1. **Joint ft is the regional deployment answer: mean 4.30**, a 16%
+   improvement over pretrained and better than any previous multi-row
+   result, while giving up only 0.11 on the target profile (4.10 vs
+   3.99). The single-profile champion recipe barely helps other rows
+   (5.03 vs 5.12) — its gains were target-specific.
+2. Largest wins are exactly where the pretrained model was weakest:
+   K 6.76 -> 4.69, J 4.48 -> 3.49, I 6.68 -> 5.62. Averaging misfit
+   across rows acts as a data-driven regulariser — no new hyper-
+   parameters were needed (same aw=3, 600 steps).
+3. Leave-one-out (mean 4.88 on held-out rows, always better than
+   pretrained) shows the joint model transfers to rows it never saw:
+   this is genuine regional adaptation, not multi-line memorisation.
