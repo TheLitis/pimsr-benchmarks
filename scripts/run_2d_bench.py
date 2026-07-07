@@ -34,14 +34,7 @@ PROFILE_IDS = ["MTH15", "MTH16", "WYYS1", "WYYS2", "WYYS3", "WYH18", "WYH19"]
 
 def load_model(path: str):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model = PimsrNet2D(
-        n_freq=int(ckpt["n_freq"]),
-        n_stations=int(ckpt["n_stations"]),
-        n_depth=int(ckpt["n_depth"]),
-        n_x=int(ckpt["n_x"]),
-        n_scenarios=int(ckpt["n_scenarios"]),
-    )
-    model.load_state_dict(ckpt["model_state"])
+    model = PimsrNet2D.from_checkpoint(ckpt)
     model.eval()
     return model, ckpt
 
@@ -50,9 +43,13 @@ def bench_synthetic(model, ckpt, test_h5: str, n: int) -> dict:
     with h5py.File(test_h5, "r") as f:
         lr = f["obs_mt_log10_rho"][:n].astype(np.float32)
         ph = f["obs_mt_phase"][:n].astype(np.float32) / 45.0
+        chans = [lr, ph]
+        if model.in_channels == 4:
+            chans.append(f["obs_mt_log10_rho_tm"][:n].astype(np.float32))
+            chans.append(f["obs_mt_phase_tm"][:n].astype(np.float32) / 45.0)
         tgt = f["target_log10_res"][:n].astype(np.float32)
         scen = f["scenario"][:n]
-    obs = np.stack([lr, ph], axis=1)
+    obs = np.stack(chans, axis=1)
     obs = (obs - ckpt["stats_mean"]) / ckpt["stats_std"]
 
     t0 = time.time()
@@ -139,7 +136,30 @@ def bench_real_profile(model, ckpt, emtf_dir, freqs, station_x) -> dict:
     lr = np.stack([np.interp(x_model, x_km, lr_st[i]) for i in range(n_f)])
     ph = np.stack([np.interp(x_model, x_km, ph_st[i]) for i in range(n_f)])
 
-    obs = np.stack([lr, ph / 45.0])[None].astype(np.float32)
+    if model.in_channels == 4:
+        from pimsr_benchmarks.emtf import resample_station_modes
+
+        lrs = {k: np.empty((n_f, len(profile))) for k in ("te", "tm")}
+        phs = {k: np.empty((n_f, len(profile))) for k in ("te", "tm")}
+        for j, st in enumerate(profile):
+            m = resample_station_modes(st, periods)
+            lrs["te"][:, j], phs["te"][:, j] = m["lr_te"], m["ph_te"]
+            lrs["tm"][:, j], phs["tm"][:, j] = m["lr_tm"], m["ph_tm"]
+        chan = {}
+        for k in ("te", "tm"):
+            chan[f"lr_{k}"] = np.stack(
+                [np.interp(x_model, x_km, lrs[k][i]) for i in range(n_f)]
+            )
+            chan[f"ph_{k}"] = np.stack(
+                [np.interp(x_model, x_km, phs[k][i]) for i in range(n_f)]
+            )
+        obs = np.stack(
+            [chan["lr_te"], chan["ph_te"] / 45.0,
+             chan["lr_tm"], chan["ph_tm"] / 45.0]
+        )[None].astype(np.float32)
+        lr, ph = chan["lr_te"], chan["ph_te"]  # physics check stays TE-referenced
+    else:
+        obs = np.stack([lr, ph / 45.0])[None].astype(np.float32)
     obs = (obs - ckpt["stats_mean"]) / ckpt["stats_std"]
     with torch.no_grad():
         out = model(torch.from_numpy(obs.astype(np.float32)))

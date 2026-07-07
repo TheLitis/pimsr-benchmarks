@@ -19,7 +19,12 @@ import numpy as np
 
 MU0 = 4.0e-7 * np.pi
 
-__all__ = ["MTStation", "parse_emtf_xml", "resample_station"]
+__all__ = ["MTStation", "parse_emtf_xml", "resample_station", "resample_station_modes"]
+
+
+def _fold_phase(deg: np.ndarray) -> np.ndarray:
+    """Fold impedance phase into (-90, 90] (180-deg periodic convention)."""
+    return (deg + 90.0) % 180.0 - 90.0
 
 
 @dataclass
@@ -34,6 +39,24 @@ class MTStation:
     @property
     def rho_a_xy(self) -> np.ndarray:
         return np.abs(self.zxy) ** 2 * self.periods / (2.0 * np.pi * MU0)
+
+    @property
+    def rho_a_yx(self) -> np.ndarray:
+        return np.abs(self.zyx) ** 2 * self.periods / (2.0 * np.pi * MU0)
+
+    @property
+    def phase_xy(self) -> np.ndarray:
+        return _fold_phase(np.degrees(np.arctan2(self.zxy.imag, self.zxy.real)))
+
+    @property
+    def phase_yx(self) -> np.ndarray:
+        """yx phase folded to the first-quadrant convention.
+
+        Standard EMTF yx phase sits in the third quadrant (-180..-90); the
+        180-deg fold maps it to 0..90 while being robust to the occasional
+        sign-flipped or distorted station (e.g. WYI18, WYJ18).
+        """
+        return _fold_phase(np.degrees(np.arctan2(self.zyx.imag, self.zyx.real)))
 
     @property
     def rho_a_det(self) -> np.ndarray:
@@ -139,3 +162,24 @@ def resample_station(
     log_rho = np.interp(lt, lp, np.log10(st.rho_a_det))
     phase = np.interp(lt, lp, st.phase_det)
     return log_rho, phase, mask
+
+
+def resample_station_modes(
+    st: MTStation, target_periods: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Per-mode interpolation onto ``target_periods``.
+
+    Returns ``{"lr_te", "ph_te", "lr_tm", "ph_tm", "mask"}``. For an E-W
+    profile with an assumed N-S geoelectric strike, TE (E along strike)
+    maps to Z_yx and TM to Z_xy. Both phases use the 0..90 deg convention.
+    """
+    lp = np.log10(st.periods)
+    lt = np.log10(target_periods)
+    mask = (lt >= lp.min()) & (lt <= lp.max())
+    return {
+        "lr_te": np.interp(lt, lp, np.log10(st.rho_a_yx)),
+        "ph_te": np.interp(lt, lp, st.phase_yx),
+        "lr_tm": np.interp(lt, lp, np.log10(st.rho_a_xy)),
+        "ph_tm": np.interp(lt, lp, st.phase_xy),
+        "mask": mask,
+    }
