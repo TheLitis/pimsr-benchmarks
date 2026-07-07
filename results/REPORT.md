@@ -270,3 +270,67 @@ augmentation for the single-profile training signal. 200 steps, CPU-fast.
   misfit; they optimise each station independently at run time. The
   remaining 2D gap is the 10k-section dataset and the sigma-overfit early
   stopping — both queued (60k dataset, sigma warm-up).
+
+---
+
+# 60k 2D cycle: scaling results and an honest surprise
+
+60k train / 3k val / 3k test sections (12 h generation, chunk-resumable
+after two infra failures — 7 h timeout kill, then an artifact-path bug;
+zero sections were ever recomputed thanks to chunk resume). Training with
+the two fixes from the 10k post-mortem: sigma warm-up (15 epochs MSE ->
+NLL) and inverse-frequency scenario class weights.
+
+## Pretrained model (vs 10k baseline)
+
+| Metric | 10k model | 60k model | Verdict |
+|---|---|---|---|
+| Synthetic RMSE (500 sections) | 0.646 | 0.637 | ~flat |
+| 1-sigma coverage (ideal 0.68) | 0.75 | 0.755 | ~flat |
+| Scenario accuracy | 0.26 | 0.29 | small gain |
+| Real profile nRMS (no ft) | 6.54 | **6.16** | **-6 %** |
+
+## Fine-tune sweep (200-600 steps, anchor 0.3-10)
+
+Best config aw=3 / 600 steps: real nRMS **5.12**, coverage 0.69,
+synthetic RMSE 0.635 (unchanged).
+
+| Model | Real nRMS after ft | Coverage after ft |
+|---|---|---|
+| 10k + ft (aw=3/200) | **4.59** | 0.69 |
+| 60k + ft (aw=3/600) | 5.12 | 0.69 |
+
+## Honest findings
+
+1. **Data scaling hit a wall.** 6x data gave ~0 synthetic improvement.
+   The bottleneck is not dataset size but model capacity / task noise
+   floor: val RMSE plateaued at ~0.65 within 16 epochs on both datasets.
+2. **Sigma warm-up did not fix NLL divergence** — it delayed it (~epoch
+   30 vs ~20), then val NLL still exploded (0.005 -> 32 by ep. 79).
+   The divergence is driven by the train/val NLL gap, not early sigma
+   noise. Proper fix: sigma regularisation or early stop on val NLL.
+3. **The 10k fine-tuned model remains the real-data champion (4.59).**
+   The 60k pretrained model starts closer to the real data (6.16 vs
+   6.54) but fine-tunes to a worse endpoint (5.12 vs 4.59). A plausible
+   reading: the 60k model's stronger prior is also stiffer — the anchor
+   pulls it back to a sharper synthetic optimum, leaving less room to
+   adapt. Single-profile fine-tuning has high variance either way.
+4. Scenario head stays weak (0.29-0.30) despite class weights — the
+   lenses are simply hard to detect at this resolution; needs
+   architectural work (deeper decoder or attention), not loss tweaks.
+
+## Where the leaderboard stands
+
+| Method | Real nRMS | Type |
+|---|---|---|
+| Occam / Hybrid | 2.57 / 2.59 | iterative per-station |
+| **2D U-Net 10k + ft** | **4.59** | single pass |
+| 2D U-Net 60k + ft | 5.12 | single pass |
+| 2D U-Net 60k pretrained | 6.16 | single pass |
+| 1D neural + ft | 6.14 | single pass |
+
+**Conclusion of the scaling experiment:** more synthetic data is not the
+lever. The remaining gap to iterative methods is structural (single pass
+vs per-station optimisation). The highest-value next step is the 2D
+hybrid: U-Net warm-start + a few SimPEG Gauss-Newton iterations, which
+in the 1D case closed the gap entirely at 2.4x the classical speed.
