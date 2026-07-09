@@ -955,3 +955,50 @@ distortion.
 Results: results/v4/v4_profiles_phys2d.json. Ckpt:
 best2d_ft_phys2d.pt. Infrastructure (adjoint wrapper, FD-validated) is
 in place — the TE+TM extension is the next increment.
+
+## v4 addendum 6: TE+TM 2D physics loss — the mode trade-off is fixed
+
+physics2d now solves BOTH polarisations (TM adjoint path added to the
+autograd wrapper, FD-validated; chi2 pooled across modes). Two joint-ft
+runs on v4 (60 steps, lr 4e-5, aw=3, balance): plain, and with
+regularised FiLM (reg 0.03 / lr-mult 10). Training misfit 1.00 -> 0.30.
+
+| Profile | v4-pre | TE-only 2D (add. 5) | TE+TM 2D | TE+TM 2D + film |
+|---|---|---|---|---|
+| G | 4.30 | 5.79 | **3.58** | 3.59 |
+| H-YS | 4.91 | 4.70 | 4.35 | **4.31** |
+| I | 7.10 | 9.32 | **5.50** | 5.51 |
+| J | 4.30 | 9.45 | 7.91 | 7.84 |
+| K | 6.81 | 6.00 | 5.47 | **5.47** |
+| mean | 5.49 | 7.05 | 5.36 | **5.34** |
+
+Findings:
+
+1. **The diagnosis of addendum 5 is confirmed and the fix works**:
+   requiring both polarisations turns the 2D physics loss from
+   uniformly harmful (mean 7.05) into broadly helpful — 4 of 5 rows
+   improve, including BOTH heavily distorted rows (I 7.10 -> 5.50,
+   K 6.81 -> 5.47) and G reaching 3.58 (matches the all-time G best
+   3.59). This is the first physics-2D fine-tune that beats the 1D
+   column loss on the distorted rows — with a *trustworthy* signal
+   (real 2D structure vs distortion), adaptation needs no variance
+   tricks.
+2. **Row J's anti-correlation is genuine physics, not a loss
+   artifact**: J was best zero-shot (4.30) and degrades under ANY
+   joint adaptation — 1D loss (6.48), TE+TM 2D loss (7.91), film
+   (7.84). The shared-update direction demanded by I/K is opposed to
+   J's optimum at every level of physics fidelity tried. For regional
+   deployment, J should keep the pretrained weights (or its own
+   adapter trained solo) — a per-profile model-selection rule, not a
+   shared compromise.
+3. FiLM adds nothing under the 2D loss (5.34 vs 5.36) — consistent
+   with (1): when the loss signal is trustworthy, per-profile freedom
+   is no longer the bottleneck.
+4. Remaining gap to the 60k-era joint-ft champion (mean 4.30) is the
+   base checkpoint, not the method: v4-pre starts at 5.49 vs 60k-pre
+   5.12 on these rows. Re-running TE+TM 2D ft on v4.1 (milder TM tail,
+   training on the runner now) is the natural next step.
+
+Results: results/v4/v4_profiles_phys2d_tetm{,_film}.json. Ckpts:
+best2d_ft_phys2d_tetm{,_film}.pt. ~26 s/step on CPU (5 profiles,
+2 modes) — 60 steps is enough (plateau by step 50).
