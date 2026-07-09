@@ -919,3 +919,39 @@ lever for the distorted rows is a trustworthy physics signal — the
 
 Results: results/v4/v4_profiles_win5.json. Ckpts:
 best2d_ft_film_win5.pt, best2d_ft_bal_win5.pt.
+
+## v4 addendum 5: 2D-forward physics loss (negative result, diagnosed)
+
+`pimsr_inversion/physics2d.py` (committed): differentiable TE 2D forward
+— SimPEG solve wrapped in a custom autograd Function with adjoint
+(Jtvec) gradients, FD-validated; static-shift-invariant chi2 on a
+frequency subset. `finetune2d --phys2d` swaps it in for the per-column
+1D loss (~13 s/step for 5 profiles, 60 steps, lr 4e-5, balance).
+
+Training converged well: pooled physics misfit 0.99 -> 0.25 (-75%).
+But the honest TE+TM section metric got WORSE nearly everywhere:
+
+| Profile | v4-pre | phys2d-ft |
+|---|---|---|
+| G | 4.30 | 5.79 |
+| H-YS | 4.91 | 4.70 |
+| I | 7.10 | 9.32 |
+| J | 4.30 | 9.45 |
+| K | 6.81 | 6.00 |
+| mean | 5.49 | 7.05 |
+
+Diagnosis: **mode mismatch, not a broken gradient**. The loss drives a
+hard fit of the TE curves only, and a 2D model has enough freedom to
+explain TE galvanic distortion with shallow structure — degrading TM
+consistency, which the evaluation metric checks. The per-column 1D loss
+was accidentally protected from this: a layered column responds
+identically in both modes, so it cannot trade one mode against the
+other. Root fix is a **TE+TM 2D loss** (TM forward exists in
+pimsr-forward mt2d; needs the same adjoint wrapper) — then lateral
+structure must satisfy both polarisations simultaneously, which is
+exactly the physics that distinguishes real 2D structure from galvanic
+distortion.
+
+Results: results/v4/v4_profiles_phys2d.json. Ckpt:
+best2d_ft_phys2d.pt. Infrastructure (adjoint wrapper, FD-validated) is
+in place — the TE+TM extension is the next increment.
