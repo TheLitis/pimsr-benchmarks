@@ -888,3 +888,34 @@ Findings:
 
 Results: results/v4/v4_profiles_film_reg.json. Ckpts:
 best2d_ft_film_r03m10.pt, best2d_ft_film_r10m10.pt.
+
+## v4 addendum 4: windowed sub-profile fine-tuning (negative result)
+
+`finetune2d --windows W` (committed): each profile contributes, besides
+the full station line, every contiguous W-station window as an
+alternative view; each step draws one random view per profile. The hope:
+multi-sample self-supervision stops a profile's FiLM adapter from
+overfitting its single distorted curve set (the row-I failure).
+
+Two runs on v4 (aw=3/600, balance, windows=5):
+
+| Profile | film+win5 | film no-win (add. 2) | bal+win5 | bal no-win (add. 1) |
+|---|---|---|---|---|
+| G | 4.40 | 4.28 | 3.90 | 3.89 |
+| H-YS | 4.00 | 3.72 | 4.31 | 3.95 |
+| I | 8.58 | 8.31 | 5.24 | 5.24 |
+| J | 5.31 | 5.33 | 6.59 | 6.48 |
+| K | 4.56 | 4.59 | 5.58 | 5.60 |
+| mean | 5.37 | 5.25 | 5.12 | 5.03 |
+
+Finding: **windowing does not break the variance floor** — row I's
+adapter still overfits (8.58), and every configuration is within noise
+of (or slightly worse than) its non-windowed counterpart. The windows
+are contiguous and overlap heavily, so they are strongly correlated
+views of the same distorted curves: the adapter sees no genuinely new
+constraint. This closes the "cheap multi-sample" branch; the remaining
+lever for the distorted rows is a trustworthy physics signal — the
+**2D-forward physics loss** — which is the right next milestone.
+
+Results: results/v4/v4_profiles_win5.json. Ckpts:
+best2d_ft_film_win5.pt, best2d_ft_bal_win5.pt.
