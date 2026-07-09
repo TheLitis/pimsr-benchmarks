@@ -683,3 +683,58 @@ ModEM runtime: 24-210 s/profile (20-100+ NLCG iterations).
    family as the already-beaten Occam2DMT, Unix-only) is deprioritised;
    the production-comparison milestone is now closed with two
    independent production codes.
+
+---
+
+# v4 cycle: 60k TE+TM + per-mode galvanic distortion augmentation
+
+Goal: combine v3's TM-mode gains with 60k scale, and fix the unseen-row
+weakness (v3 rows I/K mean 7.42) via per-section TM distortion severity
+(static shift sigma U[0.15, 0.40], correlated distortion amplitude
+logU[0.25, 0.60] — roughly 2x the TE level, matching real yx behaviour).
+Dataset run 28966933155 (60k/3k/3k, seed 7; survived three infra
+failures — runner disconnect, internet outage, SimPEG worker memory
+leak — all fixed: install retries, max_tasks_per_child=1). Training run
+28988267907 (80 epochs, beta-NLL 0.5, multiscale head; best epoch 16,
+val RMSE 0.6271 — best of any cycle).
+
+## Synthetic test (500 sections, results/v4/bench_pre)
+
+| metric | v4 | v3 (10k) | 60k TE |
+|---|---|---|---|
+| RMSE log10 rho | **0.609** | 0.618 | 0.634 |
+| sigma coverage (1σ, ideal 0.683) | 0.812 | 0.812 | 0.755 |
+| scenario accuracy | 0.40 | 0.40 | 0.29 |
+
+## Real profiles (shift-invariant 2D-forward nRMS, results/v4/v4_profiles.json)
+
+| Profile | v4-pre | v4-ft-YS | v4-ft-joint | best previous |
+|---|---|---|---|---|
+| G | 4.30 | 3.95 | 4.07 | 3.59 (60k joint-ft) |
+| H-YS | 4.91 | **3.92** | 4.09 | 3.99 (sreg-ft) |
+| I | 7.10 | 6.78 | **5.33** | 5.62 (60k joint-ft) |
+| J | 4.30 | 4.32 | 7.00 | 3.49 (60k joint-ft) |
+| K | 6.81 | 6.51 | **5.10** | 4.69 (60k joint-ft) |
+| **mean** | 5.49 | 5.10 | 5.12 | **4.30** (60k joint-ft) |
+
+## Findings
+
+1. **New target-profile champion: v4-ft-YS = 3.92 on H-YS** (first
+   sub-3.99), and its transfer to G (3.95) is strong.
+2. **The augmentation works where it aimed**: rows I and K — the
+   distorted/3D rows that motivated v4 — improve under joint ft to
+   5.33 and 5.10, and I even beats the previous best (5.62).
+3. **But it costs elsewhere**: zero-shot H-YS degrades to 4.91 (v3:
+   4.36) — heavy TM distortion in training makes the model too
+   conservative on cleaner profiles; and J collapses under joint ft
+   (7.00 vs 4.30 pre) — the shared ft update is dominated by the
+   hard rows at J's expense.
+4. **The overall 5-row champion remains 60k joint-ft (4.30).** v4 is
+   the best model on the hardest rows and the target profile, but not
+   on average. Distortion augmentation should likely be *milder*
+   (upper tail 0.4-0.45, not 0.60) or curriculum-scheduled.
+5. Training-side wins are unambiguous: best synthetic RMSE (0.609),
+   calibration and scenario accuracy held at v3 levels with 6x data.
+
+Next candidates: (a) v4.1 with milder TM severity tail, (b) per-profile
+ft weighting in joint mode (loss balancing), (c) the 2D->3D migration.
