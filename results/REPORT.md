@@ -810,3 +810,43 @@ Findings:
 
 Results: results/v4/v4_profiles_film.json. Ckpt:
 best2d_ft_joint_film.pt (adapters stored under `film_adapters`).
+
+## v4 addendum 2: per-profile FiLM adapters
+
+`finetune2d --film` (committed): zero-initialised per-profile
+(gamma, beta) on the bottleneck (2 x 192 params per profile, lr 50x the
+anchored trunk), trained jointly with `--balance` on all five rows.
+Adapters are stored in the checkpoint and applied by profile name at
+evaluation. This tests the row-J hypothesis: shared weights learn the
+common regional shift, adapters absorb the anti-correlated per-profile
+distortion compensation.
+
+| Profile | joint+balance (no film) | joint+balance+film | best previous |
+|---|---|---|---|
+| G | 3.89 | 4.28 | 3.59 |
+| H-YS | 3.95 | **3.72** | 3.92 |
+| I | 5.24 | 8.31 | 5.24 |
+| J | 6.48 | **5.33** | 3.49 (pre-ft) |
+| K | 5.60 | **4.59** | 4.69 |
+| mean | 5.03 | 5.25 | — |
+
+Findings:
+
+1. **The hypothesis is half-confirmed.** FiLM does what it was built
+   for on three rows: J recovers from the collapse (6.48 -> 5.33), K
+   sets a best-ever (4.59), and H-YS sets a new overall champion
+   (3.72, first sub-3.9). The anti-correlated compensation *is*
+   absorbable by 384 per-profile parameters.
+2. **Row I inverts the story**: its adapter drives the 1D-column
+   physics loss down but the rigorous 2D-forward nRMS up (5.24 ->
+   8.31). For the most strongly 3D-distorted row, freely fitting the
+   distorted curves through a 1D physics loss is actively harmful —
+   the adapter needs either a stronger prior (adapter norm penalty) or
+   the physics target needs to be the 2D forward, not per-column 1D.
+3. Champions after this experiment: H-YS 3.72 (film), K 4.59 (film),
+   I 5.24 (balance), G 3.59 / J 3.49 / 5-row mean 4.30 (60k joint-ft).
+
+Result file: results/v4/v4_profiles_film.json (columns: v4-pre,
+v4-ft-YS=film checkpoint, v4-ft-joint=balanced checkpoint).
+Next lever: adapter norm regularisation or a 2D-forward physics loss
+for the distorted rows.
