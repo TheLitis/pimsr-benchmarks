@@ -74,9 +74,11 @@ def hybrid_1d_section(inv, lr, ph, periods, station_x, x_grid, depth_grid):
     return columns_to_section(np.stack(cols, axis=1), station_x, x_grid)
 
 
-def unet_section(checkpoint, lr, ph, modes=None):
+def unet_section(checkpoint, lr, ph, modes=None, profile_name=None):
     """Single U-Net pass. For 4-channel (TE+TM) v3 models pass ``modes``
-    from :func:`assemble_profile_modes`."""
+    from :func:`assemble_profile_modes`. If the checkpoint carries FiLM
+    adapters (``film_adapters``) and ``profile_name`` matches one, that
+    profile's adapter is applied at the bottleneck."""
     import sys
 
     import torch
@@ -95,8 +97,13 @@ def unet_section(checkpoint, lr, ph, modes=None):
     else:
         obs = np.stack([lr, ph / 45.0])[None].astype(np.float32)
     obs = (obs - ckpt["stats_mean"]) / ckpt["stats_std"]
+    film = None
+    adapters = ckpt.get("film_adapters")
+    if adapters and profile_name in adapters:
+        a = adapters[profile_name]
+        film = (a["gamma"].float(), a["beta"].float())
     with torch.no_grad():
-        out = model(torch.from_numpy(obs.astype(np.float32)))
+        out = model(torch.from_numpy(obs.astype(np.float32)), film=film)
     return out["log_rho"][0].numpy()
 
 

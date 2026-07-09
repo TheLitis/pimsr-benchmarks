@@ -63,7 +63,7 @@ def main() -> None:
         )
         row = {}
         for label, ck in ckpts.items():
-            sec = unet_section(ck, lr, ph, modes=modes)
+            sec = unet_section(ck, lr, ph, modes=modes, profile_name=pname)
             row[label] = float(
                 section_nrms_2d(
                     sec, lr, ph, freqs, station_x, x_grid, depth_grid
