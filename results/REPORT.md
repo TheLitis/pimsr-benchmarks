@@ -738,3 +738,37 @@ val RMSE 0.6271 — best of any cycle).
 
 Next candidates: (a) v4.1 with milder TM severity tail, (b) per-profile
 ft weighting in joint mode (loss balancing), (c) the 2D->3D migration.
+
+## v4 addendum: balanced joint fine-tuning (the row-J investigation)
+
+`finetune2d --balance` (committed) normalises each profile's physics
+misfit by its pretrained value, so distorted rows cannot dominate the
+shared update. Two experiments on the v4 checkpoint (aw=3, 600 steps):
+
+| Profile | pre | joint | joint+balance | balance, no J |
+|---|---|---|---|---|
+| G | 4.30 | 4.07 | 3.89 | 3.95 |
+| H-YS | 4.91 | 4.09 | 3.95 | 3.97 |
+| I | 7.10 | 5.33 | **5.24** | 5.26 |
+| J | 4.30 | 7.00 | 6.48 | **7.37** |
+| K | 6.81 | 5.10 | 5.60 | 5.90 |
+| mean | 5.49 | 5.12 | **5.03** | 5.29 |
+
+Findings:
+
+1. Balancing helps everywhere except K: best v4 joint mean (5.03), new
+   best-ever row I (5.24), and G/H-YS at near-champion levels from a
+   single shared model.
+2. **The row-J mystery resolved**: excluding J from the joint update
+   makes J *worse* (7.37), not better. J's collapse is not caused by
+   its own gradient — it is collateral damage from the adaptation
+   direction demanded by the distorted rows (I, K). J is
+   anti-correlated with them: whatever galvanic-distortion compensation
+   the network learns for I/K actively mismodels J's clean curves.
+   Loss weighting cannot fix an anti-correlated objective — this needs
+   either per-profile adapters (small FiLM/LoRA-style heads) or an
+   input-side distortion estimator, not shared-weight ft.
+3. Overall champion is still 60k joint-ft (4.30 mean): v4's heavy TM
+   augmentation costs more on average than it buys on hard rows.
+
+Results: results/v4/v4_profiles_bal.json, v4_profiles_bal_noJ.json.
