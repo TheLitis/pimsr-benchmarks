@@ -850,3 +850,41 @@ Result file: results/v4/v4_profiles_film.json (columns: v4-pre,
 v4-ft-YS=film checkpoint, v4-ft-joint=balanced checkpoint).
 Next lever: adapter norm regularisation or a 2D-forward physics loss
 for the distorted rows.
+
+## v4 addendum 3: regularised FiLM adapters (the row-I fix)
+
+`finetune2d --film-reg W --film-lr-mult M` (committed): L2 anchor pulling
+each adapter to identity + configurable adapter lr. Sweep on the v4
+checkpoint (aw=3/600, balance+film): reg 0.03 and 0.10, both with lr-mult
+10 (was 50). Columns below: unregularised film vs the two configs.
+
+| Profile | film (no reg) | reg 0.03 / m10 | reg 0.10 / m10 |
+|---|---|---|---|
+| G | 4.28 | 3.94 | 3.88 |
+| H-YS | **3.72** | 3.98 | 3.91 |
+| I | 8.31 | **5.15** | 5.24 |
+| J | **5.33** | 6.28 | 6.32 |
+| K | **4.59** | 5.84 | 5.68 |
+| mean | 5.25 | 5.04 | 5.01 |
+
+Findings:
+
+1. **The row-I fix works as designed**: taming the adapter (8.31 ->
+   5.15, a best-ever for I) confirms the diagnosis — I's failure was
+   adapter overfit through the 1D physics loss, not a modelling limit.
+2. **But the trade-off is conserved**: with weak adapters the
+   anti-correlated rows J and K lose their adapter-driven wins
+   (J 5.33 -> 6.28, K 4.59 -> 5.68) and the board converges back to
+   the plain-balance solution (~5.0 mean). One 384-param dial per
+   profile cannot be simultaneously strong (J/K need it) and safe
+   (I needs it) when each profile is a single training sample.
+3. Champions stand: H-YS 3.72 and K 4.59 (film no-reg), I 5.15
+   (film reg 0.03), G 3.59 / J 3.49 / mean 4.30 (60k-era ckpts).
+4. Conclusion for the paper: per-profile adaptation on single-sample
+   self-supervision has a variance floor; breaking it needs either a
+   2D-forward physics loss (trustworthy signal for distorted rows) or
+   multi-sample per-profile data (windowed sub-profiles). Both are
+   candidates for the next milestone.
+
+Results: results/v4/v4_profiles_film_reg.json. Ckpts:
+best2d_ft_film_r03m10.pt, best2d_ft_film_r10m10.pt.
