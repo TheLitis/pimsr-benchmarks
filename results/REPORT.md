@@ -1002,3 +1002,46 @@ Findings:
 Results: results/v4/v4_profiles_phys2d_tetm{,_film}.json. Ckpts:
 best2d_ft_phys2d_tetm{,_film}.pt. ~26 s/step on CPU (5 profiles,
 2 modes) — 60 steps is enough (plateau by step 50).
+
+## v4.1 cycle: milder TM severity tail
+
+Dataset with the TM distortion tail capped at shift 0.32 / distortion
+0.45 (v4: 0.40/0.60); gen run 29028709926, training run 29051192458
+(best ep 14, val RMSE 0.6459). Synthetic (500): RMSE 0.617,
+coverage 0.81, scenario acc 0.414 (best ever). Columns: v4.1 zero-shot,
+v4.1 + TE+TM 2D joint ft (60 steps, physics 1.00 -> 0.19), v4 zero-shot
+reference.
+
+| Profile | v4.1-pre | v4.1 + TE+TM ft | v4-pre |
+|---|---|---|---|
+| G | 5.04 | 3.72 | 4.30 |
+| H-YS | **4.31** | 5.72 | 4.91 |
+| I | 7.21 | 6.98 | 7.10 |
+| J | **4.10** | 8.95 | 4.30 |
+| K | 8.10 | **4.54** | 6.81 |
+| mean | 5.75 | 5.98 | 5.49 |
+
+Findings:
+
+1. **The v4.1 hypothesis is confirmed**: softening the TM tail
+   recovers zero-shot performance on clean profiles — H-YS 4.31 (v4:
+   4.91, v3: 4.36) and J 4.10 (best-ever zero-shot J). The cost is
+   exactly where expected: heavy-distortion rows regress zero-shot
+   (K 8.10 vs 6.81).
+2. **TE+TM ft remains the distorted-row tool**: on v4.1 it fixes K
+   spectacularly (8.10 -> 4.54) and G (5.04 -> 3.72), but on this
+   base it also drags H-YS down (4.31 -> 5.72) — the shared update
+   again serves the rows that need it most. J collapses as always.
+3. **Per-profile model selection across the two v4.1 columns** gives
+   G 3.72 / H-YS 4.31 / I 6.98 / J 4.10 / K 4.54 = mean 4.73 — decent,
+   but the 60k-era joint-ft champion (4.30) still stands. Augmentation
+   tuning traded off against itself; the data-side lever looks
+   exhausted at 10k sections.
+4. Deployment recipe consolidated by three independent cycles
+   (v4, v4.1, 60k): pretrained weights for clean/anti-correlated rows
+   (H-YS, J), TE+TM 2D ft for distorted rows (I, K, G) — selection by
+   per-profile physics misfit, which is computable without ground
+   truth.
+
+Results: results/v41/{v41_zeroshot,v41_tetm}.json, bench in
+results/v41/bench. Ckpts local: /vercel/share/pimsr-data/v41/.
