@@ -776,44 +776,6 @@ Results: results/v4/v4_profiles_bal.json, v4_profiles_bal_noJ.json.
 ## v4 addendum 2: per-profile FiLM adapters
 
 `finetune2d --film` (committed): zero-initialised per-profile
-(gamma, beta) on the U-Net bottleneck (2 x 192 params/profile, lr 50x
-shared), trained jointly with balanced misfit; evaluation applies each
-profile's own adapter (`unet_section(..., profile_name=...)`).
-Hypothesis from addendum 1: adapters should absorb the anti-correlated
-distortion compensation that shared-weight ft cannot.
-
-| Profile | joint+balance (shared only) | joint+balance+FiLM |
-|---|---|---|
-| G | 3.89 | 4.37 |
-| H-YS | 3.95 | **3.74** |
-| I | 5.24 | 8.54 |
-| J | 6.48 | **5.42** |
-| K | 5.60 | **4.65** |
-| mean | **5.03** | 5.34 |
-
-Findings:
-
-1. **Partial confirmation of the adapter hypothesis**: J recovers
-   (6.48 -> 5.42) — its anti-correlated compensation moved into its
-   adapter instead of fighting the shared update. K improves to a
-   v4-best 4.65, and H-YS reaches **3.74 — the new all-time
-   target-profile record** (previous 3.92).
-2. **But row I destabilises** (5.24 -> 8.54): with lr 50x and only one
-   sample per profile, I's adapter overfits its heavily distorted
-   curves — exactly the profile with the most 3D contamination gets
-   the least trustworthy self-supervision. Adapters need their own
-   anchor/regularisation (or lower lr) before this recipe is safe.
-3. Mean is worse than plain balance (5.34 vs 5.03): FiLM trades
-   variance across rows for per-row wins. Next iteration: L2 penalty
-   on (gamma, beta), film-lr 10x, or share adapters between
-   similarly-distorted rows (I+K).
-
-Results: results/v4/v4_profiles_film.json. Ckpt:
-best2d_ft_joint_film.pt (adapters stored under `film_adapters`).
-
-## v4 addendum 2: per-profile FiLM adapters
-
-`finetune2d --film` (committed): zero-initialised per-profile
 (gamma, beta) on the bottleneck (2 x 192 params per profile, lr 50x the
 anchored trunk), trained jointly with `--balance` on all five rows.
 Adapters are stored in the checkpoint and applied by profile name at
