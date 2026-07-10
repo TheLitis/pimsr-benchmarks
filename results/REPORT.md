@@ -537,7 +537,7 @@ TM mode doubles the physical information per station (dataset run
 28868401447, 10k/1k/1k TE+TM sections, seed 3; training run
 28891525012, 80 epochs, `--beta 0.5 --scen-head multiscale`).
 
-## Synthetic test (500 sections, results/v3/synthetic.json)
+## Synthetic test (500 sections, results/v3/conv2d_synthetic.json)
 
 | Metric | v2 60k (TE, sigma-reg) | v3 10k (TE+TM, beta-NLL) |
 |---|---|---|
