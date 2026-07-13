@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "metric": {
+    "id": "section_nrms_2d",
+    "physics": "SimPEG 2D TE+TM forward consistency",
+    "ground_truth_claim": false,
+    "forbid_metric_ids": [
+      "station_nrms_1d",
+      "column_nrms_1d"
+    ]
+  },
+  "provenance": {
+    "repositories": {
+      "pimsr-geogen": "dc45d25",
+      "pimsr-forward": "a31cac5",
+      "pimsr-inversion": "26b383a",
+      "pimsr-benchmarks": "9523a3e"
+    },
+    "datasets": {
+      "v4_test": {
+        "artifact_id": 8186838048,
+        "seed": 4
+      },
+      "v41_test": {
+        "artifact_id": 8211849332,
+        "seed": 41
+      }
+    },
+    "checkpoints": {
+      "v4": {
+        "artifact_id": 8188106449,
+        "adaptation": "zero-shot"
+      },
+      "v41": {
+        "artifact_id": 8212533349,
+        "adaptation": "zero-shot"
+      },
+      "regional_60k_joint_ft": {
+        "adaptation": "regional/joint",
+        "mean_nrms_2d": 4.3
+      },
+      "v4_film_hys": {
+        "adaptation": "profile-adapted",
+        "profile": "H-YS",
+        "nrms_2d": 3.72
+      }
+    }
+  },
+  "yellowstone_unified": {
+    "occam1d-stitched": {
+      "nrms_2d": 7.782008704825537,
+      "wall_time_s": 7.40208428699998
+    },
+    "neural1d-stitched": {
+      "nrms_2d": 6.48901166366273,
+      "wall_time_s": 0.03613616100028594
+    },
+    "hybrid1d-stitched": {
+      "nrms_2d": 6.500336477285889,
+      "wall_time_s": 2.9009600860003957
+    },
+    "unet-10k": {
+      "nrms_2d": 5.733152874974525
+    },
+    "unet-10k-ft": {
+      "nrms_2d": 4.521712709191608
+    },
+    "unet-60k": {
+      "nrms_2d": 4.785346664968613
+    },
+    "unet-60k-ft": {
+      "nrms_2d": 4.468866712990514
+    },
+    "hybrid2d-gn8": {
+      "nrms_2d": 5.045900451729996,
+      "wall_time_s": 41.33194216899983
+    },
+    "cold-gn25": {
+      "nrms_2d": 4.895371060153301,
+      "wall_time_s": 132.49931775100004
+    }
+  },
+  "regional_profiles": {
+    "G": {
+      "v4-pre": 4.303630522728788,
+      "v4-ft-YS": 3.8923101347075657,
+      "v4-ft-joint": 4.0722435210192796
+    },
+    "H-YS": {
+      "v4-pre": 4.908915965458933,
+      "v4-ft-YS": 3.9502684920713236,
+      "v4-ft-joint": 4.092802476716522
+    },
+    "I": {
+      "v4-pre": 7.09974412380803,
+      "v4-ft-YS": 5.237156916499055,
+      "v4-ft-joint": 5.33203342581374
+    },
+    "J": {
+      "v4-pre": 4.304940380458662,
+      "v4-ft-YS": 6.482784012476071,
+      "v4-ft-joint": 6.9966876424478635
+    },
+    "K": {
+      "v4-pre": 6.810036390131116,
+      "v4-ft-YS": 5.60084644541525,
+      "v4-ft-joint": 5.096139504426903
+    }
+  },
+  "regional_bootstrap_95": {
+    "v4-pre": {
+      "estimate": 5.4854534765171055,
+      "low": 4.425211554366767,
+      "high": 6.545695398667445,
+      "confidence": 0.95,
+      "n": 5,
+      "seed": 20260713
+    },
+    "v4-ft-YS": {
+      "estimate": 5.0326732002338534,
+      "low": 4.184462834011367,
+      "high": 5.8808835664563395,
+      "confidence": 0.95,
+      "n": 5,
+      "seed": 20260713
+    },
+    "v4-ft-joint": {
+      "estimate": 5.1179813140848625,
+      "low": 4.285246299979701,
+      "high": 6.0788679748353225,
+      "confidence": 0.95,
+      "n": 5,
+      "seed": 20260713
+    }
+  },
+  "limitations": [
+    "Five real profiles from one region",
+    "Adapted checkpoints use observations from evaluation profiles",
+    "Real-data score is forward consistency, not geological ground-truth error",
+    "Independent 3D validation has not yet been performed"
+  ]
+}

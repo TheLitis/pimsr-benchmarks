@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "metric": {
+    "id": "section_nrms_2d",
+    "physics": "SimPEG 2D TE+TM forward consistency",
+    "ground_truth_claim": false,
+    "forbid_metric_ids": ["station_nrms_1d", "column_nrms_1d"]
+  },
+  "repositories": {
+    "pimsr-geogen": "dc45d25",
+    "pimsr-forward": "a31cac5",
+    "pimsr-inversion": "26b383a",
+    "pimsr-benchmarks": "9523a3e"
+  },
+  "datasets": {
+    "v4_test": {"artifact_id": 8186838048, "seed": 4},
+    "v41_test": {"artifact_id": 8211849332, "seed": 41}
+  },
+  "checkpoints": {
+    "v4": {"artifact_id": 8188106449, "adaptation": "zero-shot"},
+    "v41": {"artifact_id": 8212533349, "adaptation": "zero-shot"},
+    "regional_60k_joint_ft": {"adaptation": "regional/joint", "mean_nrms_2d": 4.30},
+    "v4_film_hys": {"adaptation": "profile-adapted", "profile": "H-YS", "nrms_2d": 3.72}
+  },
+  "profiles": ["G", "H-YS", "I", "J", "K"],
+  "limitations": [
+    "Five real profiles from one region",
+    "Adapted checkpoints use observations from evaluation profiles",
+    "Real-data score is forward consistency, not geological ground-truth error",
+    "Independent 3D validation has not yet been performed"
+  ]
+}
