@@ -1,0 +1,907 @@
+{
+  "schema_version": 1,
+  "registry_id": "pimsr-sota-methods",
+  "as_of_date": "2026-08-23",
+  "protocol_document": "docs/SOTA_PROTOCOL.md",
+  "methods": [
+    {
+      "id": "rdon",
+      "name": "Reversible Deep Operator Network (RDON)",
+      "dimensionality": ["2d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "common_retrain", "refinement"],
+      "publications": [
+        {
+          "title": "Reversible Deep Operator Network for Grid-Independent, Multi-Scale Magnetotelluric Inversion and Uncertainty Quantification",
+          "doi": "10.1029/2025JB033046",
+          "url": "https://doi.org/10.1029/2025JB033046"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/zhangheng-1/RDON",
+        "ref": {
+          "kind": "commit",
+          "value": "c6a34f78ef1adf9e663d909851acbc5e5be81fab",
+          "resolved_commit": "c6a34f78ef1adf9e663d909851acbc5e5be81fab"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "training_data_and_checkpoints",
+          "availability": "available",
+          "url": "https://doi.org/10.5281/zenodo.19343192",
+          "immutable_id": "doi:10.5281/zenodo.19343192",
+          "caveat": "Record contents and every downloaded file still require SHA-256 capture in the run manifest."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "reported_no_license_file",
+        "caveat": "No repository license file was identified; do not redistribute or modify the code without permission."
+      },
+      "caveats": [
+        "Published data and checkpoints make a frozen run possible, but comparability depends on adapting the input contract without test-set tuning.",
+        "License uncertainty blocks redistribution in benchmark containers."
+      ]
+    },
+    {
+      "id": "mt2dinv_densenet",
+      "name": "MT2DInv-DenseNet",
+      "dimensionality": ["2d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["common_retrain"],
+      "publications": [
+        {
+          "title": "A two-dimensional magnetotelluric deep learning inversion approach based on improved Dense Convolutional Network",
+          "doi": "10.1016/j.cageo.2024.105765",
+          "url": "https://doi.org/10.1016/j.cageo.2024.105765"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/Geo-huang/MT2DInv-DenseNet",
+        "ref": {
+          "kind": "commit",
+          "value": "56f3d30f42daadb87eea94a0d4c73b05abfdae41",
+          "resolved_commit": "56f3d30f42daadb87eea94a0d4c73b05abfdae41"
+        },
+        "release": {
+          "kind": "tag",
+          "value": "v1.2",
+          "resolved_commit": "9fc46d91c40f8a1a73155c84950689d0fb92662a"
+        }
+      },
+      "artifacts": [
+        {
+          "kind": "software_source_release",
+          "availability": "available",
+          "url": "https://doi.org/10.5281/zenodo.14120745",
+          "immutable_id": "doi:10.5281/zenodo.14120745",
+          "caveat": "The v1.2 Zenodo ZIP contains source scripts and README only; it contains no training data or checkpoints. Zenodo metadata is CC-BY-4.0, but that does not establish a license for the repository source."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "reported_no_license_file",
+        "caveat": "The repository has no identified license file; Zenodo metadata licensing does not automatically license source code."
+      },
+      "caveats": [
+        "The evaluated source commit is newer than the v1.2 tag target; results must name one exact source ref and must not conflate them.",
+        "No immutable pretrained weights were found, so only common retraining is eligible.",
+        "License uncertainty blocks redistribution in benchmark containers."
+      ]
+    },
+    {
+      "id": "mtdlpy",
+      "name": "MTDLPy",
+      "dimensionality": ["2d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["common_retrain"],
+      "publications": [
+        {
+          "title": "MTDLPy: An open-source deep learning inversion software for magnetotellurics",
+          "doi": "10.1016/j.cageo.2026.106219",
+          "url": "https://doi.org/10.1016/j.cageo.2026.106219"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/Yuan-Chongxin/MTDLPy",
+        "ref": {
+          "kind": "commit",
+          "value": "b01f72a53078a9dc8d452fa53ea5009639d00b04",
+          "resolved_commit": "b01f72a53078a9dc8d452fa53ea5009639d00b04"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "source",
+          "availability": "available",
+          "url": "https://github.com/Yuan-Chongxin/MTDLPy",
+          "immutable_id": "git:b01f72a53078a9dc8d452fa53ea5009639d00b04",
+          "caveat": "No separately archived frozen checkpoint was identified, so this method enters only the common-retrain track."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "The license applies to repository source; external datasets and pretrained assets retain their own terms."
+      },
+      "caveats": [
+        "A frozen-artifact score is ineligible until an immutable pretrained checkpoint and preprocessing state are registered.",
+        "The DOI is registered and resolvable, but Crossref lists the journal issue date as September 2026, after this registry's 2026-08-23 as-of date."
+      ]
+    },
+    {
+      "id": "mare2dem",
+      "name": "MARE2DEM",
+      "dimensionality": ["2d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "refinement"],
+      "publications": [
+        {
+          "title": "MARE2DEM: A 2-D inversion code for controlled-source electromagnetic and magnetotelluric data",
+          "doi": "10.1093/gji/ggw290",
+          "url": "https://doi.org/10.1093/gji/ggw290"
+        }
+      ],
+      "source": {
+        "repository_url": "https://bitbucket.org/mare2dem/mare2dem_source",
+        "ref": {
+          "kind": "tag",
+          "value": "v5.2.1",
+          "resolved_commit": "f6b9f2d60bbf4b0272cc7f8bcb6b496d832697d6"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "source_release",
+          "availability": "available",
+          "url": "https://bitbucket.org/mare2dem/mare2dem_source/src/v5.2.1/",
+          "immutable_id": "tag:v5.2.1@f6b9f2d60bbf4b0272cc7f8bcb6b496d832697d6",
+          "caveat": "Compiler, MPI, PETSc and solver settings must be fixed in the environment manifest."
+        }
+      ],
+      "license": {
+        "spdx": "GPL-3.0-only",
+        "status": "verified_repository_file",
+        "caveat": "Redistributed binaries and modifications must comply with GPL-3.0-only."
+      },
+      "caveats": [
+        "The baseline and PIMSR-initialized refinement are separate tracks with separate initialization disclosures."
+      ]
+    },
+    {
+      "id": "simpeg",
+      "name": "SimPEG",
+      "dimensionality": ["1d", "2d"],
+      "status": "reference_only",
+      "tracks": ["frozen_artifact", "refinement"],
+      "publications": [
+        {
+          "title": "SimPEG: An open source framework for simulation and gradient based parameter estimation in geophysical applications",
+          "doi": "10.1016/j.cageo.2015.09.015",
+          "url": "https://doi.org/10.1016/j.cageo.2015.09.015"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/simpeg/simpeg",
+        "ref": {
+          "kind": "tag",
+          "value": "v0.25.2",
+          "resolved_commit": "5f2d643c484ebe8b8ccfa029aa7377d133f2f53f"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "package_release",
+          "availability": "available",
+          "url": "https://pypi.org/project/SimPEG/0.25.2/",
+          "immutable_id": "version:0.25.2@5f2d643c484ebe8b8ccfa029aa7377d133f2f53f",
+          "caveat": "Wheel and source-distribution SHA-256 values must be captured from the selected package artifact."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "Dependencies and input datasets retain their own licenses."
+      },
+      "caveats": [
+        "This is a numerical sanity/reference implementation, not a claimed learned SOTA method."
+      ]
+    },
+    {
+      "id": "modem",
+      "name": "ModEM",
+      "dimensionality": ["2d", "3d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "refinement"],
+      "publications": [
+        {
+          "title": "ModEM: A modular system for inversion of electromagnetic geophysical data",
+          "doi": "10.1016/j.cageo.2014.01.010",
+          "url": "https://doi.org/10.1016/j.cageo.2014.01.010"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/magnetotellurics/ModEM",
+        "ref": {
+          "kind": "tag",
+          "value": "EMIW-2026",
+          "resolved_commit": "55a4aa62f7e8366fbf78a23ee8a19c1d4561d0c3"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "source_release",
+          "availability": "available",
+          "url": "https://github.com/magnetotellurics/ModEM/releases/tag/EMIW-2026",
+          "immutable_id": "tag:EMIW-2026@55a4aa62f7e8366fbf78a23ee8a19c1d4561d0c3",
+          "caveat": "EMIW-2026 is explicitly described upstream as a workshop release rather than a main version release."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "The selected source ref and linked examples/tools must be checked independently for their applicable notices."
+      },
+      "caveats": [
+        "All build flags, solver variants, regularization, error floors and stopping criteria must be preregistered.",
+        "Known upstream solver issues must be recorded if they affect the selected executable path."
+      ]
+    },
+    {
+      "id": "mt3d_cnn",
+      "name": "MT3D_CNN",
+      "dimensionality": ["3d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact"],
+      "publications": [
+        {
+          "title": "Estimating Three-Dimensional Resistivity Distribution with Magnetotelluric Data and a Deep Learning Algorithm",
+          "doi": "10.3390/rs16183400",
+          "url": "https://doi.org/10.3390/rs16183400"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/Jon-GSC/MT3D_CNN",
+        "ref": {
+          "kind": "commit",
+          "value": "9843ba52b517c38692c96990b9e4b843b055f735",
+          "resolved_commit": "9843ba52b517c38692c96990b9e4b843b055f735"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "checkpoint_scaler_and_validation_examples",
+          "availability": "available",
+          "url": "https://github.com/Jon-GSC/MT3D_CNN/tree/9843ba52b517c38692c96990b9e4b843b055f735",
+          "immutable_id": "git:9843ba52b517c38692c96990b9e4b843b055f735:weights_1.best.hdf5+std_scaler.bin",
+          "caveat": "The repository exposes inference assets and validation examples but does not expose a complete common-retraining workflow."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "Government of Canada Crown Copyright and trademark notices in the repository remain applicable."
+      },
+      "caveats": [
+        "Only the frozen checkpoint track is currently eligible; the repository states that uploaded code is for testing the trained CNN on synthetic models."
+      ]
+    },
+    {
+      "id": "gemmie",
+      "name": "GEMMIE",
+      "dimensionality": ["3d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "refinement"],
+      "publications": [
+        {
+          "title": "Three-dimensional magnetotelluric inversion using integral equation method and non-local parametrization",
+          "doi": "10.1093/gji/ggag173",
+          "url": "https://doi.org/10.1093/gji/ggag173"
+        }
+      ],
+      "source": {
+        "repository_url": "https://gitlab.com/m.kruglyakov/gemmie",
+        "ref": {
+          "kind": "commit",
+          "value": "32019342e8c5d9728ec0ad39019ad64c14546e01",
+          "resolved_commit": "32019342e8c5d9728ec0ad39019ad64c14546e01"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "synthetic_impedance_dataset",
+          "availability": "available",
+          "url": "https://doi.org/10.5281/zenodo.15541282",
+          "immutable_id": "doi:10.5281/zenodo.15541282",
+          "caveat": "The Zenodo record contains 16 synthetic impedance-data files, not source code. Source is pinned separately to the GitLab commit; every downloaded data file still requires a SHA-256 manifest entry."
+        }
+      ],
+      "license": {
+        "spdx": "GPL-2.0-only",
+        "status": "verified_repository_file",
+        "caveat": "Redistribution and modifications must comply with GPL-2.0-only."
+      },
+      "caveats": [
+        "The benchmark must document integral-equation domain padding and non-local parametrization settings.",
+        "The Zenodo data record and GitLab source are separate artifacts and must not be described as one source archive."
+      ]
+    },
+    {
+      "id": "femtic",
+      "name": "FEMTIC",
+      "dimensionality": ["3d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "refinement"],
+      "publications": [
+        {
+          "title": "3-D inversion of magnetotelluric data using unstructured tetrahedral elements: applicability to data affected by topography",
+          "doi": "10.1093/gji/ggv186",
+          "url": "https://doi.org/10.1093/gji/ggv186"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/yoshiya-usui/femtic",
+        "ref": {
+          "kind": "tag",
+          "value": "v5.0",
+          "resolved_commit": "e3a665b4fa58e77734f074b1fc7f18a5a03708ee"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "source_release",
+          "availability": "available",
+          "url": "https://github.com/yoshiya-usui/femtic/releases/tag/v5.0",
+          "immutable_id": "tag:v5.0@e3a665b4fa58e77734f074b1fc7f18a5a03708ee",
+          "caveat": "Mesh-generation tools, numerical libraries and MPI/OpenMP configuration require separate provenance."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "THIRD_PARTY_NOTICES and licenses for external meshing tools remain applicable."
+      },
+      "caveats": [
+        "Mesh family, topography treatment, anisotropy mode and distortion parameters must be held fixed across compared runs."
+      ]
+    },
+    {
+      "id": "deva3dmt",
+      "name": "DEVA3DMT public research edition",
+      "dimensionality": ["3d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "refinement"],
+      "publications": [
+        {
+          "title": "3D inversion of magnetotelluric data by using a hybrid forward-modeling approach and mesh decoupling",
+          "doi": "10.1190/geo2019-0202.1",
+          "url": "https://doi.org/10.1190/geo2019-0202.1"
+        },
+        {
+          "title": "A novel hybrid finite element - finite difference approach for 3D magnetotelluric modeling",
+          "doi": "10.1016/j.cageo.2024.105614",
+          "url": "https://doi.org/10.1016/j.cageo.2024.105614"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/varilsuhad/DEVA3DMT",
+        "ref": {
+          "kind": "commit",
+          "value": "a46355a4da119fdd70db7a513672faa449899e0f",
+          "resolved_commit": "a46355a4da119fdd70db7a513672faa449899e0f"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "reduced_source_edition",
+          "availability": "available",
+          "url": "https://github.com/varilsuhad/DEVA3DMT/tree/a46355a4da119fdd70db7a513672faa449899e0f",
+          "immutable_id": "git:a46355a4da119fdd70db7a513672faa449899e0f",
+          "caveat": "The public single-GPU edition deliberately omits the paper's multi-GPU, mesh-decoupling and GUI features; benchmark claims apply only to these exact public bytes."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The repository carries a custom non-commercial research license rather than an OSI/SPDX license; use and redistribution must follow its exact terms."
+      },
+      "caveats": [
+        "Requires MATLAB plus a CUDA-capable GPU, and upstream recommends at least 24 GB of VRAM.",
+        "The public reduced edition must not be represented as reproducing the private/full paper implementation."
+      ]
+    },
+    {
+      "id": "gan_mt1dinv",
+      "name": "GAN-MT1DInv",
+      "dimensionality": ["1d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact", "common_retrain", "refinement"],
+      "publications": [
+        {
+          "title": "GAN-MT1DInv: A physics-informed generative adversarial network for magnetotelluric inversion",
+          "doi": "10.1016/j.cageo.2026.106148",
+          "url": "https://doi.org/10.1016/j.cageo.2026.106148"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/TuanfuGui/CG",
+        "ref": {
+          "kind": "commit",
+          "value": "cefccf36019a11bfa1a62ee27bea30c65aab5cb3",
+          "resolved_commit": "cefccf36019a11bfa1a62ee27bea30c65aab5cb3"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "source_data_and_checkpoints",
+          "availability": "available",
+          "url": "https://github.com/TuanfuGui/CG/tree/cefccf36019a11bfa1a62ee27bea30c65aab5cb3/1D",
+          "immutable_id": "git:cefccf36019a11bfa1a62ee27bea30c65aab5cb3:1D",
+          "caveat": "The repository includes Python/MATLAB scripts, sample data and PTH assets, but every consumed file still requires an independent SHA-256 snapshot."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "reported_no_license_file",
+        "caveat": "The README limits the project to research use but no repository license file was identified; do not redistribute or modify it without permission."
+      },
+      "caveats": [
+        "The adapter must separate released-weight inference, common retraining and per-observation adversarial refinement into different tracks.",
+        "MATLAB-only baseline and plotting steps are not silently substituted with different implementations."
+      ]
+    },
+    {
+      "id": "guided_1d",
+      "name": "Physically Guided Deep Unsupervised 1D Inversion",
+      "dimensionality": ["1d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["frozen_artifact"],
+      "publications": [
+        {
+          "title": "Physically Guided Deep Unsupervised Inversion for 1-D Magnetotelluric Models",
+          "doi": "10.1109/LGRS.2025.3528767",
+          "url": "https://doi.org/10.1109/LGRS.2025.3528767"
+        }
+      ],
+      "source": {
+        "repository_url": "https://github.com/PAULGOYES/MT_guided1DInversion",
+        "ref": {
+          "kind": "commit",
+          "value": "2731cebbdc163d1df26f9e88673ddfdd8a38469a",
+          "resolved_commit": "2731cebbdc163d1df26f9e88673ddfdd8a38469a"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "experiment_notebook",
+          "availability": "available",
+          "url": "https://github.com/PAULGOYES/MT_guided1DInversion/blob/2731cebbdc163d1df26f9e88673ddfdd8a38469a/experiment1.ipynb",
+          "immutable_id": "git:2731cebbdc163d1df26f9e88673ddfdd8a38469a:experiment1.ipynb",
+          "caveat": "The public artifact reproduces experiment 1 only; it is not a complete packaged implementation of every paper experiment."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "The repository source is MIT licensed; paper figures and third-party inputs retain their own terms."
+      },
+      "caveats": [
+        "This is an observation-specific optimization method, so fixed iterations, initialization and stopping rules must be preregistered for each paired run.",
+        "Only experiment 1 is currently independently runnable from the public notebook."
+      ]
+    },
+    {
+      "id": "mt_mamba",
+      "name": "MT-Mamba",
+      "dimensionality": ["3d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Physics-informed continuous state space models for probabilistic imaging in complex nonlinear media: A 3d magnetotelluric application",
+          "doi": "10.1016/j.chaos.2026.118347",
+          "url": "https://doi.org/10.1016/j.chaos.2026.118347"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No executable source/checkpoint artifact was identified for an independent run."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "Keep claims on a paper-only shadow board; do not mix reported paper numbers with independently reproduced scores."
+      ]
+    },
+    {
+      "id": "p_physinv",
+      "name": "P-PhysInv",
+      "dimensionality": ["3d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "3-D Magnetotelluric Deep Learning Inversion Guided by Pseudo-Physical Information",
+          "doi": "10.48550/arXiv.2410.09388",
+          "url": "https://doi.org/10.48550/arXiv.2410.09388"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable code and checkpoint bundle was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "Paper-reported metrics are context only until source, weights, preprocessing and evaluation data become independently runnable."
+      ]
+    },
+    {
+      "id": "mt2dinv_unet",
+      "name": "MT2DInv-Unet",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "MT2DInv-Unet: A two-dimensional magnetotelluric inversion method based on deep-learning technology",
+          "doi": "10.1190/geo2023-0004.1",
+          "url": "https://doi.org/10.1190/geo2023-0004.1"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable code and checkpoint bundle was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "Paper-reported metrics are retained only on the shadow board."
+      ]
+    },
+    {
+      "id": "mt3d_net",
+      "name": "MT3D-Net",
+      "dimensionality": ["3d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "A 3-D Magnetotelluric Inversion Method Based on the Joint Data-Driven and Physics-Driven Deep Learning Technology",
+          "doi": "10.1109/TGRS.2024.3369179",
+          "url": "https://doi.org/10.1109/TGRS.2024.3369179"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable code and checkpoint bundle was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "Paper-reported metrics are retained only on the shadow board."
+      ]
+    },
+    {
+      "id": "mt1d_inr",
+      "name": "Implicit Neural Representation 1D MT Inversion",
+      "dimensionality": ["1d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Implicit Neural Representations Framework for One-Dimensional Magnetotelluric Inversion",
+          "doi": "10.48550/arXiv.2606.17069",
+          "url": "https://doi.org/10.48550/arXiv.2606.17069"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "The preprint states that reproduction code will be opened after acceptance; no independently runnable artifact was identified as of the registry date."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "Keep the method on the paper-only shadow board until its promised code and exact experiment state are public."
+      ]
+    },
+    {
+      "id": "trans_scale_mt",
+      "name": "Trans-Scale MT Inversion",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Trans-Scale Magnetotelluric Inversion via Deep Learning Guided by the Principle of Physical Similarity",
+          "doi": "10.1109/TGRS.2026.3708559",
+          "url": "https://doi.org/10.1109/TGRS.2026.3708559"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable source/checkpoint bundle was identified for the published trans-scale method."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "Reported cross-frequency performance remains contextual until the scaling transform, weights and preprocessing are independently executable."
+      ]
+    },
+    {
+      "id": "pimsr",
+      "name": "PIMSR physics-informed MT inversion",
+      "dimensionality": ["1d", "2d", "3d"],
+      "status": "reproducible_first_wave",
+      "tracks": ["common_retrain", "refinement"],
+      "publications": [],
+      "source": {
+        "repository_url": "https://github.com/TheLitis/pimsr-inversion",
+        "ref": {
+          "kind": "commit",
+          "value": "2e4d636736762bb3e7c8e2fe66ddbc98297c6a0b",
+          "resolved_commit": "2e4d636736762bb3e7c8e2fe66ddbc98297c6a0b"
+        },
+        "release": null
+      },
+      "artifacts": [
+        {
+          "kind": "source",
+          "availability": "available",
+          "url": "https://github.com/TheLitis/pimsr-inversion/tree/2e4d636736762bb3e7c8e2fe66ddbc98297c6a0b",
+          "immutable_id": "git:2e4d636736762bb3e7c8e2fe66ddbc98297c6a0b",
+          "caveat": "This pins the public 0.2.0 source on origin/main; no checkpoint, adapter smoke result, or completed SOTA score is implied."
+        }
+      ],
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "The repository source is MIT licensed; generated data, upstream solvers and external datasets retain their own terms."
+      },
+      "caveats": [
+        "Registry state is artifact_pinned only. Promotion to adapter_smoke_passed or benchmark_complete requires validated execution manifests.",
+        "Source publication alone does not promote any PIMSR comparison beyond artifact_pinned."
+      ]
+    }
+  ],
+  "datasets": [
+    {
+      "id": "coprod2",
+      "name": "COPROD2",
+      "dimensionality": "2d",
+      "kind": "field",
+      "status": "eligible",
+      "source_url": "https://www.mtnet.info/data/coprod2/coprod2.html",
+      "artifact_availability": "downloadable",
+      "truth": "not_applicable",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The official page provides use/citation guidance but no machine-readable redistribution license."
+      },
+      "caveats": [
+        "Register corrected and original data as distinct artifacts; they must never share a result row.",
+        "Preserve the documented impedance orientation and time-sign convention."
+      ]
+    },
+    {
+      "id": "coprod2s1",
+      "name": "COPROD2S1",
+      "dimensionality": "2d",
+      "kind": "synthetic",
+      "status": "eligible",
+      "source_url": "https://www.mtnet.info/data/coprod2s/coprod2s.html",
+      "artifact_availability": "downloadable",
+      "truth": "available",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No machine-readable redistribution license was identified on the official data page."
+      },
+      "caveats": [
+        "COPROD2S1 and COPROD2S2 have different models and must remain separate benchmark families.",
+        "Format-specific phase quadrants and exp(-iwt) notes must be normalized explicitly."
+      ]
+    },
+    {
+      "id": "coprod2s2",
+      "name": "COPROD2S2",
+      "dimensionality": "2d",
+      "kind": "synthetic",
+      "status": "eligible",
+      "source_url": "https://www.mtnet.info/data/coprod2s/coprod2s.html",
+      "artifact_availability": "downloadable",
+      "truth": "available",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No machine-readable redistribution license was identified on the official data page."
+      },
+      "caveats": [
+        "Noise, scatter and static shifts are part of the benchmark and may not be silently corrected method-by-method.",
+        "Format-specific phase quadrants and exp(-iwt) notes must be normalized explicitly."
+      ]
+    },
+    {
+      "id": "mt3dinv4_sphere",
+      "name": "MT3DINV4 sphere forward benchmark",
+      "dimensionality": "3d",
+      "kind": "synthetic",
+      "status": "eligible",
+      "source_url": "https://mt3dinv4.mtnet.info/Forward_model.html",
+      "artifact_availability": "official_page",
+      "truth": "available",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The workshop specification is public, but redistribution terms for linked executables and responses require separate review."
+      },
+      "caveats": [
+        "Use the analytic sphere solution as a forward-code check, not as a learned inversion training example."
+      ]
+    },
+    {
+      "id": "mt3dinv4_secret",
+      "name": "MT3DINV4 secret model (MT3DINV4S)",
+      "dimensionality": "3d",
+      "kind": "synthetic",
+      "status": "conditional",
+      "source_url": "https://mt3dinv4.mtnet.info/Secret_model.html",
+      "artifact_availability": "downloadable",
+      "truth": "withheld",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The workshop page exposes data but does not provide a machine-readable redistribution license."
+      },
+      "caveats": [
+        "Model-space metrics remain unavailable while truth is withheld; use preregistered data-space evaluation only.",
+        "Noise-free and noise-added variants are distinct immutable inputs."
+      ]
+    },
+    {
+      "id": "mt3dinv4_raglan",
+      "name": "MT3DINV4 Raglan Zones 2 and 3",
+      "dimensionality": "3d",
+      "kind": "field",
+      "status": "eligible",
+      "source_url": "https://mt3dinv4.mtnet.info/Real_data.html",
+      "artifact_availability": "downloadable",
+      "truth": "not_applicable",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The public workshop and Quebec source pages must be consulted for use and redistribution terms."
+      },
+      "caveats": [
+        "Raw and corrected datasets, repeated-site choices and the four outlying sites require preregistered handling.",
+        "Field data are held out from training, architecture selection, hyperparameter tuning and refinement on the scored profile."
+      ]
+    },
+    {
+      "id": "pimsr_generated_2d_v1",
+      "name": "PIMSR generated 2-D hidden synthetic benchmark v1",
+      "dimensionality": "2d",
+      "kind": "synthetic",
+      "status": "conditional",
+      "source_url": "https://github.com/TheLitis/pimsr-forward/tree/dc36edac75dbd51cc92679a35f38d42d0e276299",
+      "artifact_availability": "not_yet_materialized",
+      "truth": "not_yet_materialized",
+      "checksum_policy": "sha256_required_before_run",
+      "license": {
+        "spdx": "MIT",
+        "status": "verified_repository_file",
+        "caveat": "The generator source is MIT licensed; a future generated artifact requires its own immutable manifest and provenance."
+      },
+      "caveats": [
+        "This is a conditional generation definition, not an existing dataset: no bytes, truth arrays or checksums are currently registered.",
+        "The schema-v2 generator source is pinned, but no benchmark dataset bytes have been generated or registered.",
+        "Materialization must publish observation, truth, coordinate and grouped split hashes before any adapter or benchmark status can be claimed.",
+        "An independently verified scoring solve and non-overlapping train/validation/refinement/hidden-test groups are still required by the protocol."
+      ],
+      "generator": {
+        "schema_version": 1,
+        "producer_id": "pimsr-forward",
+        "repository_url": "https://github.com/TheLitis/pimsr-forward",
+        "source_commit": "dc36edac75dbd51cc92679a35f38d42d0e276299",
+        "source_status": "artifact_pinned",
+        "entrypoint": "pimsr-forward-dataset2d",
+        "materialization_status": "conditional_not_materialized",
+        "command_template": ["pimsr-forward-dataset2d", "--out", "<new-output.h5>", "--n", "500", "--seed", "20260823", "--start-index", "0"],
+        "sample_count": 500,
+        "master_seed": 20260823,
+        "start_index": 0,
+        "grouping_contract": "scenario/sample_index/noise_realization_v1",
+        "physical_contract": {
+          "dataset_schema": "pimsr-mt-2d",
+          "dataset_schema_version": 2,
+          "axes": ["x", "z"],
+          "axis_unit": "m",
+          "handedness": "right_handed",
+          "vertical_positive": "down",
+          "rotation_degrees": 0.0,
+          "components": ["Zyx", "Zxy"],
+          "representations": ["log10_rho", "phase"],
+          "frequency_unit": "Hz",
+          "phase_unit": "degree",
+          "phase_convention": "degrees_modulo_180_[0,180)",
+          "time_convention": "exp(+i_omega_t)",
+          "resistivity_unit": "ohm_m"
+        },
+        "required_snapshot_roles": ["dataset", "observations", "truth", "coordinates", "split_groups"]
+      }
+    }
+  ]
+}

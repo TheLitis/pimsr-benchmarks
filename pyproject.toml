@@ -4,30 +4,42 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pimsr-benchmarks"
-version = "0.1.0"
-description = "Benchmarks of PIMSR neural inversion vs classical Occam 1D MT inversion on synthetic and real USArray data"
+version = "0.2.0"
+description = "Reproducible synthetic and field benchmarks for PIMSR MT inversion"
 readme = "README.md"
-license = { text = "MIT" }
-requires-python = ">=3.10"
+license = "MIT"
+requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.24",
   "h5py>=3.8",
-  "pimsr-forward @ git+https://github.com/TheLitis/pimsr-forward.git",
-  "pimsr-inversion @ git+https://github.com/TheLitis/pimsr-inversion.git",
+  "pimsr-forward[mt2d] @ git+https://github.com/TheLitis/pimsr-forward.git@dc36edac75dbd51cc92679a35f38d42d0e276299",
+  "pimsr-inversion @ git+https://github.com/TheLitis/pimsr-inversion.git@2e4d636736762bb3e7c8e2fe66ddbc98297c6a0b",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.4"]
+dev = ["pytest>=7", "ruff==0.16.4"]
 
 [project.scripts]
 pimsr-bench = "pimsr_benchmarks.cli:main"
+pimsr-sota-validate = "pimsr_benchmarks.sota:main"
+pimsr-sota-manifest = "pimsr_benchmarks.sota_manifests:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pimsr_benchmarks"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config/sota_methods.json" = "pimsr_benchmarks/data/sota_methods.json"
+"docs/SOTA_PROTOCOL.md" = "pimsr_benchmarks/data/SOTA_PROTOCOL.md"
+
+[tool.hatch.build]
+exclude = [
+  "/data",
+  "/results",
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.ruff]
 line-length = 90
-target-version = "py310"
+target-version = "py311"
