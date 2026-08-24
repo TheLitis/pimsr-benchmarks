@@ -2,10 +2,10 @@
 
 import numpy as np
 import pytest
+from pimsr_forward.mt1d import mt1d_response
 
 from pimsr_benchmarks.hybrid import _project_to_mesh
 from pimsr_benchmarks.occam1d import default_mesh, occam1d_invert
-from pimsr_forward.mt1d import mt1d_response
 
 
 def _two_layer_data():

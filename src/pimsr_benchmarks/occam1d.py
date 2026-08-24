@@ -14,19 +14,40 @@ same data vector [log10 rho_a; phase/45].
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Integral, Real
 from time import perf_counter
 
 import numpy as np
-
 from pimsr_forward.mt1d import mt1d_response
 
-__all__ = ["OccamResult", "occam1d_invert", "default_mesh"]
+from .metrics import _phase_residual_deg
+
+__all__ = ["OccamResult", "default_mesh", "occam1d_invert"]
 
 
-def default_mesh(n_cells: int = 48, z_min: float = 10.0, z_max: float = 6.0e4) -> np.ndarray:
+def default_mesh(
+    n_cells: int = 48, z_min: float = 10.0, z_max: float = 6.0e4
+) -> np.ndarray:
     """Log-spaced layer thicknesses (m) spanning the MT sensitivity range."""
+    if isinstance(n_cells, bool) or not isinstance(n_cells, Integral):
+        raise TypeError("n_cells must be an integer")
+    if n_cells < 1:
+        raise ValueError("n_cells must be positive")
+    z_min = _positive_scalar(z_min, name="z_min")
+    z_max = _positive_scalar(z_max, name="z_max")
+    if z_max <= z_min:
+        raise ValueError("z_max must be greater than z_min")
     edges = np.logspace(np.log10(z_min), np.log10(z_max), n_cells + 1)
     return np.diff(edges)
+
+
+def _positive_scalar(value: object, *, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be finite and positive")
+    return result
 
 
 @dataclass
@@ -54,14 +75,54 @@ def _forward(m: np.ndarray, thick: np.ndarray, periods: np.ndarray) -> np.ndarra
 def _jacobian(
     m: np.ndarray, thick: np.ndarray, periods: np.ndarray, d0: np.ndarray
 ) -> np.ndarray:
-    """Forward-difference Jacobian d(data)/d(log10 rho)."""
+    """Forward-difference Jacobian d(data)/d(log10 rho).
+
+    The phase block uses the same shortest 180-degree branch as the data
+    objective.  This avoids a spurious derivative of roughly 180/eps when a
+    finite-difference perturbation crosses the phase representation cut.
+    """
     eps = 1e-4
+    n_periods = periods.size
+    if d0.shape != (2 * n_periods,):
+        raise ValueError("forward data must contain one rho and phase per period")
     J = np.zeros((d0.size, m.size))
     for j in range(m.size):
         mp = m.copy()
         mp[j] += eps
-        J[:, j] = (_forward(mp, thick, periods) - d0) / eps
+        perturbed = _forward(mp, thick, periods)
+        J[:n_periods, j] = (
+            perturbed[:n_periods] - d0[:n_periods]
+        ) / eps
+        J[n_periods:, j] = _phase_residual_deg(
+            perturbed[n_periods:] * 45.0,
+            d0[n_periods:] * 45.0,
+        ) / (45.0 * eps)
     return J
+
+
+def _weighted_data_residual(
+    obs_log10_rho_a: np.ndarray,
+    obs_phase: np.ndarray,
+    predicted: np.ndarray,
+    weights: np.ndarray,
+) -> np.ndarray:
+    """Return the weighted linear-rho/periodic-phase objective residual."""
+    n_periods = obs_log10_rho_a.size
+    if obs_phase.shape != obs_log10_rho_a.shape:
+        raise ValueError("observed apparent resistivity and phase shapes must match")
+    if predicted.shape != (2 * n_periods,) or weights.shape != predicted.shape:
+        raise ValueError("predicted data and weights have incompatible shapes")
+    residual = np.concatenate(
+        [
+            obs_log10_rho_a - predicted[:n_periods],
+            _phase_residual_deg(
+                obs_phase,
+                predicted[n_periods:] * 45.0,
+            )
+            / 45.0,
+        ]
+    )
+    return residual * weights
 
 
 def occam1d_invert(
@@ -85,10 +146,41 @@ def occam1d_invert(
     chi-squared target is met (then held).
     """
     t0 = perf_counter()
-    thick = default_mesh() if thicknesses is None else np.asarray(thicknesses)
+    obs_log10_rho_a = np.asarray(obs_log10_rho_a, dtype=float)
+    obs_phase = np.asarray(obs_phase, dtype=float)
+    periods = np.asarray(periods, dtype=float)
+    if any(values.ndim != 1 for values in (obs_log10_rho_a, obs_phase, periods)):
+        raise ValueError("observations and periods must be one-dimensional")
+    if obs_log10_rho_a.size == 0:
+        raise ValueError("at least one MT period is required")
+    if obs_phase.shape != obs_log10_rho_a.shape or periods.shape != obs_phase.shape:
+        raise ValueError("apparent resistivity, phase and periods must have equal shapes")
+    if any(not np.isfinite(values).all() for values in (obs_log10_rho_a, obs_phase)):
+        raise ValueError("observations must be finite")
+    if not np.isfinite(periods).all() or np.any(periods <= 0.0):
+        raise ValueError("periods must be finite and positive")
+
+    err_log10_rho_a = _positive_scalar(err_log10_rho_a, name="err_log10_rho_a")
+    err_phase_deg = _positive_scalar(err_phase_deg, name="err_phase_deg")
+    target_nrms = _positive_scalar(target_nrms, name="target_nrms")
+    mu0 = _positive_scalar(mu0, name="mu0")
+    mu_cool = _positive_scalar(mu_cool, name="mu_cool")
+    if mu_cool > 1.0:
+        raise ValueError("mu_cool must not exceed 1")
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, Integral):
+        raise TypeError("max_iterations must be an integer")
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be positive")
+
+    thick = (
+        default_mesh()
+        if thicknesses is None
+        else np.asarray(thicknesses, dtype=float)
+    )
+    if thick.ndim != 1 or not np.isfinite(thick).all() or np.any(thick <= 0.0):
+        raise ValueError("thicknesses must be a finite positive one-dimensional array")
     n_cells = thick.size + 1
 
-    d_obs = np.concatenate([obs_log10_rho_a, obs_phase / 45.0])
     w = np.concatenate(
         [
             np.full(obs_log10_rho_a.size, 1.0 / err_log10_rho_a),
@@ -105,9 +197,14 @@ def occam1d_invert(
         # Warm start (e.g. from the neural inverter). A structured starting
         # model needs far less regularisation cooling, so begin closer to the
         # final trade-off point.
-        m = np.clip(np.asarray(initial_model, dtype=float).copy(), -1.0, 5.0)
-        if m.size != n_cells:
-            raise ValueError(f"initial_model size {m.size} != mesh cells {n_cells}")
+        initial = np.asarray(initial_model, dtype=float)
+        if initial.ndim != 1 or initial.size != n_cells:
+            raise ValueError(
+                f"initial_model must have shape ({n_cells},), got {initial.shape}"
+            )
+        if not np.isfinite(initial).all():
+            raise ValueError("initial_model must be finite")
+        m = np.clip(initial.copy(), -1.0, 5.0)
         mu = mu0 * mu_cool**6
     else:
         # Half-space starting model from the mean apparent resistivity.
@@ -115,10 +212,12 @@ def occam1d_invert(
         mu = mu0
     history: list[float] = []
     converged = False
+    iterations = 0
 
     for it in range(max_iterations):
+        iterations = it + 1
         d_pred = _forward(m, thick, periods)
-        r = (d_obs - d_pred) * w
+        r = _weighted_data_residual(obs_log10_rho_a, obs_phase, d_pred, w)
         nrms = float(np.sqrt(np.mean(r**2)))
         history.append(nrms)
         if nrms <= target_nrms:
@@ -139,7 +238,12 @@ def occam1d_invert(
         best_m, best_nrms = m, nrms
         for step in (1.0, 0.5, 0.25, 0.1):
             m_try = np.clip(m + step * dm, -1.0, 5.0)
-            r_try = (d_obs - _forward(m_try, thick, periods)) * w
+            r_try = _weighted_data_residual(
+                obs_log10_rho_a,
+                obs_phase,
+                _forward(m_try, thick, periods),
+                w,
+            )
             nrms_try = float(np.sqrt(np.mean(r_try**2)))
             if nrms_try < best_nrms:
                 best_m, best_nrms = m_try, nrms_try
@@ -147,11 +251,23 @@ def occam1d_invert(
         m = best_m
         mu = max(mu * mu_cool, 1.0e-2)
 
+    final_prediction = _forward(m, thick, periods)
+    final_residual = _weighted_data_residual(
+        obs_log10_rho_a,
+        obs_phase,
+        final_prediction,
+        w,
+    )
+    final_nrms = float(np.sqrt(np.mean(final_residual**2)))
+    if not history or final_nrms != history[-1]:
+        history.append(final_nrms)
+    converged = final_nrms <= target_nrms
+
     return OccamResult(
         log10_rho=m,
         thicknesses=thick,
-        nrms=history[-1] if history else float("nan"),
-        n_iterations=len(history),
+        nrms=final_nrms,
+        n_iterations=iterations,
         wall_time_s=perf_counter() - t0,
         converged=converged,
         nrms_history=history,
