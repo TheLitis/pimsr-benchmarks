@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,6 +19,30 @@ jobs:
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint
-        run: ruff check src tests
+        run: ruff check .
       - name: Test
         run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and inspect distributions
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+      - name: Install wheel and smoke-test entry points outside the checkout
+        run: |
+          python -m venv wheel-venv
+          wheel-venv/bin/pip install dist/*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/wheel-venv/bin/python" -c \
+            "import pimsr_benchmarks; from pimsr_benchmarks.sota import load_registry; print(pimsr_benchmarks.__version__, len(load_registry()['methods']))"
+          for command in pimsr-bench pimsr-sota-validate pimsr-sota-manifest
+          do
+            "$GITHUB_WORKSPACE/wheel-venv/bin/$command" --help >/dev/null
+          done
