@@ -1,13 +1,11 @@
 """Export USArray profile impedances to the ModEM 2D data format.
 
-Produces one ModEM-style data file per profile row with full-tensor
-off-diagonal impedances (Zxy, Zyx) at the stations' true coordinates —
-ready for a production ModEM / MARE2DEM comparison run (spec item 5).
+Produces one ModEM-style input file per profile row with full-tensor
+off-diagonal impedances (Zxy, Zyx) at the stations' true coordinates.
 
 Frequencies are taken from the stations themselves (union band clipped
 to the common range, log-resampled), impedance errors use the published
-variance where present with a 5 % |Z| error floor, matching common
-production practice.
+variance where present with a declared 5 % |Z| error floor.
 
 Usage:
   python scripts/export_modem_data.py --emtf-dir data/emtf \
@@ -17,13 +15,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 
 from pimsr_benchmarks.emtf import parse_emtf_xml
 from pimsr_benchmarks.hybrid2d import PROFILE_IDS, PROFILES
+from pimsr_benchmarks.runner2d import (
+    file_artifact_provenance,
+    publish_json_no_overwrite,
+    publish_text_no_overwrite,
+    require_file_artifact_unchanged,
+)
 
 MU0 = 4.0e-7 * np.pi
 ERROR_FLOOR = 0.05  # fraction of |Z| per component
@@ -35,13 +39,52 @@ def _interp_complex(lp, z, lt):
     return re + 1j * im
 
 
-def export_profile(emtf_dir: str, ids: list[str], out_path: Path,
-                   n_freq: int = 20) -> dict:
-    stations = {}
-    for f in glob.glob(f"{emtf_dir}/*.xml"):
-        st = parse_emtf_xml(f)
-        stations[st.station_id] = st
-    profile = [stations[i] for i in ids]
+def _snapshot_xml_sources(emtf_dir: str | Path) -> list[dict[str, object]]:
+    directory = Path(emtf_dir).resolve(strict=True)
+    paths = sorted(directory.glob("*.xml"), key=lambda path: path.name.casefold())
+    if not paths:
+        raise FileNotFoundError(f"no EMTF XML inputs found in {directory}")
+    return [file_artifact_provenance(path) for path in paths]
+
+
+def _require_xml_sources_unchanged(
+    emtf_dir: str | Path,
+    sources: list[dict[str, object]],
+) -> None:
+    directory = Path(emtf_dir).resolve(strict=True)
+    current = sorted(directory.glob("*.xml"), key=lambda path: path.name.casefold())
+    if [str(path.resolve()) for path in current] != [
+        str(source["path"]) for source in sources
+    ]:
+        raise RuntimeError("EMTF XML input set changed during export")
+    for source in sources:
+        require_file_artifact_unchanged(source, role="EMTF XML input")
+
+
+def _load_stations(sources: list[dict[str, object]]) -> dict[str, object]:
+    stations: dict[str, object] = {}
+    for source in sources:
+        station = parse_emtf_xml(str(source["path"]))
+        if station.station_id in stations:
+            raise ValueError(f"duplicate EMTF station ID {station.station_id!r}")
+        stations[station.station_id] = station
+    return stations
+
+
+def render_profile(
+    stations: Mapping[str, object],
+    ids: list[str],
+    n_freq: int = 20,
+) -> tuple[str, dict[str, object]]:
+    """Render one deterministic ModEM input and return its metadata."""
+    if isinstance(n_freq, bool) or not isinstance(n_freq, int):
+        raise TypeError("n_freq must be an integer")
+    if n_freq < 2:
+        raise ValueError("n_freq must be at least two")
+    missing = [station_id for station_id in ids if station_id not in stations]
+    if missing:
+        raise ValueError(f"EMTF profile stations are missing: {missing}")
+    profile = [stations[station_id] for station_id in ids]
 
     pmin = max(st.periods.min() for st in profile)
     pmax = min(st.periods.max() for st in profile)
@@ -78,13 +121,13 @@ def export_profile(emtf_dir: str, ids: list[str], out_path: Path,
                 )
                 n_rows += 1
 
-    out_path.write_text("\n".join(lines) + "\n")
-    return {
+    metadata = {
         "stations": [st.station_id for st in profile],
         "n_freq": n_freq,
         "period_range_s": [float(periods.min()), float(periods.max())],
         "rows": n_rows,
     }
+    return "\n".join(lines) + "\n", metadata
 
 
 def main() -> None:
@@ -93,17 +136,59 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--n-freq", type=int, default=20)
     args = ap.parse_args()
+    if args.n_freq < 2:
+        ap.error("--n-freq must be at least two")
 
-    out_dir = Path(args.out_dir)
+    out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = {"H-YS": PROFILE_IDS, **{k: v for k, v in PROFILES.items() if k != "H-YS"}}
-    for name, ids in rows.items():
-        info = export_profile(
-            args.emtf_dir, ids, out_dir / f"modem_{name}.dat", args.n_freq
+    output_paths = {name: out_dir / f"modem_{name}.dat" for name in rows}
+    manifest_path = out_dir / "export_manifest.json"
+    collision = next(
+        (path for path in [*output_paths.values(), manifest_path] if path.exists()),
+        None,
+    )
+    if collision is not None:
+        raise FileExistsError(f"refusing to overwrite existing export: {collision}")
+
+    sources = _snapshot_xml_sources(args.emtf_dir)
+    stations = _load_stations(sources)
+    rendered = {
+        name: render_profile(stations, ids, args.n_freq) for name, ids in rows.items()
+    }
+    _require_xml_sources_unchanged(args.emtf_dir, sources)
+
+    output_artifacts: dict[str, dict[str, object]] = {}
+    for name in rows:
+        content, info = rendered[name]
+        output_path = publish_text_no_overwrite(content, output_paths[name])
+        output_artifacts[name] = {
+            **file_artifact_provenance(output_path),
+            "profile": info,
+        }
+        print(
+            f"{name}: {info['rows']} rows, "
+            f"{len(info['stations'])} stations -> modem_{name}.dat"
         )
-        print(f"{name}: {info['rows']} rows, "
-              f"{len(info['stations'])} stations -> modem_{name}.dat")
+
+    _require_xml_sources_unchanged(args.emtf_dir, sources)
+    publish_json_no_overwrite(
+        {
+            "schema": "pimsr-modem-input-export",
+            "schema_version": 1,
+            "artifact_role": "solver_input_not_benchmark_result",
+            "configuration": {
+                "n_frequencies": args.n_freq,
+                "impedance_error_floor_fraction": ERROR_FLOOR,
+                "time_convention": "exp(-i_omega_t)",
+                "impedance_units": "[V/m]/[T]",
+            },
+            "source_artifacts": {"emtf_xml": sources},
+            "outputs": output_artifacts,
+        },
+        manifest_path,
+    )
 
 
 if __name__ == "__main__":

@@ -1,10 +1,9 @@
-"""Benchmark the conv-2D inversion network.
+"""Evaluate the conv-2D inversion network without making a SOTA claim.
 
 Synthetic: section RMSE + sigma coverage on the 2D test split.
 Real: assemble an E-W USArray profile (~44.6N through Yellowstone) into a
-pseudo-section, invert, and report the physics misfit of the recovered
-section re-simulated station-by-station with the 1D forward (a conservative
-check: the 2D network may legitimately disagree with per-station 1D).
+pseudo-section and report a legacy 1D-column TM diagnostic.  The real-data
+number is not a comparable 2D TE+TM score and is never rankable.
 
 Usage:
     python scripts/run_2d_bench.py --checkpoint best2d.pt \
@@ -14,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import time
 from pathlib import Path
@@ -23,33 +21,52 @@ import h5py
 import numpy as np
 import torch
 
-from pimsr_benchmarks.emtf import parse_emtf_xml, resample_station
+from pimsr_benchmarks.hybrid2d import (
+    assemble_profile_modes,
+    profile_geometry_metadata,
+    section_nrms,
+)
 from pimsr_benchmarks.metrics import summarize
-from pimsr_forward.mt1d import mt1d_response
-from pimsr_inversion.network2d import PimsrNet2D
+from pimsr_benchmarks.runner2d import (
+    file_artifact_provenance,
+    load_model2d,
+    prepare_profile_observation,
+    publish_json_no_overwrite,
+    publish_npz_no_overwrite,
+    require_file_artifact_unchanged,
+    stack_dataset_observations,
+)
 
 #: E-W profile at ~44.6N, west to east.
 PROFILE_IDS = ["MTH15", "MTH16", "WYYS1", "WYYS2", "WYYS3", "WYH18", "WYH19"]
 
 
-def load_model(path: str):
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    model = PimsrNet2D.from_checkpoint(ckpt)
-    model.eval()
-    return model, ckpt
+def _snapshot_emtf_sources(emtf_dir: str | Path) -> list[dict[str, object]]:
+    directory = Path(emtf_dir).resolve(strict=True)
+    paths = sorted(directory.glob("*.xml"), key=lambda path: path.name.casefold())
+    if not paths:
+        raise FileNotFoundError(f"no EMTF XML inputs found in {directory}")
+    return [file_artifact_provenance(path) for path in paths]
+
+
+def _require_emtf_sources_unchanged(
+    emtf_dir: str | Path,
+    sources: list[dict[str, object]],
+) -> None:
+    directory = Path(emtf_dir).resolve(strict=True)
+    current = sorted(directory.glob("*.xml"), key=lambda path: path.name.casefold())
+    expected_paths = [str(source["path"]) for source in sources]
+    if [str(path.resolve()) for path in current] != expected_paths:
+        raise RuntimeError("EMTF XML input set changed during the benchmark")
+    for source in sources:
+        require_file_artifact_unchanged(source, role="EMTF XML input")
 
 
 def bench_synthetic(model, ckpt, test_h5: str, n: int) -> dict:
     with h5py.File(test_h5, "r") as f:
-        lr = f["obs_mt_log10_rho"][:n].astype(np.float32)
-        ph = f["obs_mt_phase"][:n].astype(np.float32) / 45.0
-        chans = [lr, ph]
-        if model.in_channels == 4:
-            chans.append(f["obs_mt_log10_rho_tm"][:n].astype(np.float32))
-            chans.append(f["obs_mt_phase_tm"][:n].astype(np.float32) / 45.0)
+        obs = stack_dataset_observations(f, slice(0, n))
         tgt = f["target_log10_res"][:n].astype(np.float32)
         scen = f["scenario"][:n]
-    obs = np.stack(chans, axis=1)
     obs = (obs - ckpt["stats_mean"]) / ckpt["stats_std"]
 
     t0 = time.time()
@@ -65,12 +82,18 @@ def bench_synthetic(model, ckpt, test_h5: str, n: int) -> dict:
     sigma = np.exp(0.5 * ls)
     rmses = np.sqrt(((pred - tgt) ** 2).mean(axis=(1, 2)))
     cov1 = float((np.abs(pred - tgt) < sigma).mean())
-    acc = float(
-        (out["scenario_logits"].argmax(dim=1).numpy() == scen).mean()
-    )
+    acc = float((out["scenario_logits"].argmax(dim=1).numpy() == scen).mean())
     return {
+        "schema": "pimsr-2d-synthetic-method-evaluation",
+        "schema_version": 1,
+        "comparison_status": "single_method_evaluation",
+        "ranking_allowed": False,
+        "completion_requirements": [
+            "run every comparator through the same held-out split and metric contract",
+            "publish validated versioned SOTA execution manifests",
+        ],
         "method": "conv2d",
-        "n": int(len(rmses)),
+        "n": len(rmses),
         "rmse_log10_res": summarize(rmses.tolist()),
         "sigma_coverage_1": cov1,
         "scenario_accuracy": acc,
@@ -90,114 +113,100 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=500)
     args = ap.parse_args()
 
-    model, ckpt = load_model(args.checkpoint)
+    loaded = load_model2d(args.checkpoint, args.test_h5)
+    model, ckpt = loaded.model, loaded.checkpoint
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    artifacts = loaded.artifact_provenance()
+    emtf_sources = _snapshot_emtf_sources(args.emtf_dir)
     syn = bench_synthetic(model, ckpt, args.test_h5, args.n)
-    (out_dir / "conv2d_synthetic.json").write_text(json.dumps(syn, indent=2))
+    syn["artifacts"] = artifacts
     print("synthetic:", json.dumps(syn["rmse_log10_res"]))
     print("coverage:", syn["sigma_coverage_1"], "| scen acc:", syn["scenario_accuracy"])
 
-    with h5py.File(args.test_h5, "r") as f:
-        freqs = f["frequencies"][:]
-        station_x = f["station_x"][:]
+    freqs = loaded.contract.frequencies
+    station_x = loaded.contract.station_x
+    depth_grid = loaded.contract.depth_grid
 
-    real = bench_real_profile(model, ckpt, args.emtf_dir, freqs, station_x)
-    np.savez(
+    real = bench_real_profile(model, ckpt, args.emtf_dir, freqs, station_x, depth_grid)
+    array_fields = {"section", "lr_obs", "ph_obs", "period_mask", "x_model"}
+    real_public = {key: value for key, value in real.items() if key not in array_fields}
+    real_public["artifacts"] = {**artifacts, "emtf_xml": emtf_sources}
+    output_paths = (
         out_dir / "conv2d_real_profile.npz",
+        out_dir / "conv2d_synthetic.json",
+        out_dir / "conv2d_real.json",
+    )
+    existing = next((path for path in output_paths if path.exists()), None)
+    if existing is not None:
+        raise FileExistsError(
+            f"refusing to overwrite existing benchmark output: {existing}"
+        )
+    loaded.require_artifacts_unchanged()
+    _require_emtf_sources_unchanged(args.emtf_dir, emtf_sources)
+    prediction_path = publish_npz_no_overwrite(
+        output_paths[0],
         section=real["section"],
         lr_obs=real["lr_obs"],
         ph_obs=real["ph_obs"],
+        period_mask=real["period_mask"],
         x_model=real["x_model"],
     )
-    (out_dir / "conv2d_real.json").write_text(
-        json.dumps({k: v for k, v in real.items() if isinstance(v, (list, float, int))},
-                   indent=2)
-    )
-    print("real profile nRMS:", real.get("nrms_mean"))
+    real_public["prediction_artifact"] = file_artifact_provenance(prediction_path)
+    loaded.require_artifacts_unchanged()
+    _require_emtf_sources_unchanged(args.emtf_dir, emtf_sources)
+    publish_json_no_overwrite(syn, output_paths[1])
+    publish_json_no_overwrite(real_public, output_paths[2])
+    print("real profile diagnostic nRMS:", real.get("nrms_mean"))
 
 
-def bench_real_profile(model, ckpt, emtf_dir, freqs, station_x) -> dict:
+def bench_real_profile(model, ckpt, emtf_dir, freqs, station_x, depth_grid) -> dict:
     """Invert the USArray profile and physics-check the recovered section."""
-    stations = {}
-    for f in glob.glob(f"{emtf_dir}/*.xml"):
-        st = parse_emtf_xml(f)
-        stations[st.station_id] = st
-    profile = [stations[i] for i in PROFILE_IDS]
-
     periods = 1.0 / freqs
-    n_f, n_s = len(freqs), len(station_x)
+    modes = assemble_profile_modes(emtf_dir, freqs, station_x, profile_ids=PROFILE_IDS)
+    x_model, x_km = modes["x_model"], modes["x_km"]
 
-    lon = np.array([s.longitude for s in profile])
-    x_km = (lon - lon.min()) * 111.0 * np.cos(np.radians(44.6))
-    x_model = np.linspace(x_km.min(), x_km.max(), n_s)
-
-    lr_st = np.empty((n_f, len(profile)))
-    ph_st = np.empty((n_f, len(profile)))
-    for j, st in enumerate(profile):
-        lr_st[:, j], ph_st[:, j], _ = resample_station(st, periods)
-    lr = np.stack([np.interp(x_model, x_km, lr_st[i]) for i in range(n_f)])
-    ph = np.stack([np.interp(x_model, x_km, ph_st[i]) for i in range(n_f)])
-
-    if model.in_channels == 4:
-        from pimsr_benchmarks.emtf import resample_station_modes
-
-        lrs = {k: np.empty((n_f, len(profile))) for k in ("te", "tm")}
-        phs = {k: np.empty((n_f, len(profile))) for k in ("te", "tm")}
-        for j, st in enumerate(profile):
-            m = resample_station_modes(st, periods)
-            lrs["te"][:, j], phs["te"][:, j] = m["lr_te"], m["ph_te"]
-            lrs["tm"][:, j], phs["tm"][:, j] = m["lr_tm"], m["ph_tm"]
-        chan = {}
-        for k in ("te", "tm"):
-            chan[f"lr_{k}"] = np.stack(
-                [np.interp(x_model, x_km, lrs[k][i]) for i in range(n_f)]
-            )
-            chan[f"ph_{k}"] = np.stack(
-                [np.interp(x_model, x_km, phs[k][i]) for i in range(n_f)]
-            )
-        obs = np.stack(
-            [chan["lr_te"], chan["ph_te"] / 45.0,
-             chan["lr_tm"], chan["ph_tm"] / 45.0]
-        )[None].astype(np.float32)
-        lr, ph = chan["lr_te"], chan["ph_te"]  # physics check stays TE-referenced
-    else:
-        obs = np.stack([lr, ph / 45.0])[None].astype(np.float32)
-    obs = (obs - ckpt["stats_mean"]) / ckpt["stats_std"]
+    obs = prepare_profile_observation(modes, ckpt)
     with torch.no_grad():
         out = model(torch.from_numpy(obs.astype(np.float32)))
     section = out["log_rho"][0].numpy()
 
-    # physics check: re-simulate each station column with the 1D forward on
-    # the depth grid and compare to the observed response at that x.
-    # 48-node log depth grid must match the dataset's depth_grid; we rebuild
-    # layer thicknesses from consecutive node spacing.
-    from pimsr_geogen.model import DEFAULT_DEPTH_GRID
-
-    z = DEFAULT_DEPTH_GRID
-    thick = np.diff(z)
-    nrms_list = []
-    for j_model, x in enumerate(np.linspace(0, section.shape[1] - 1, len(profile)).astype(int)):
-        col = section[:, x]
-        rho = 10.0 ** col
-        # len(z) resistivities with len(z) - 1 thicknesses: the last grid
-        # value acts as the terminating half-space.
-        sim_rho, sim_ph = mt1d_response(rho, thick, periods)
-        jx = int(np.argmin(np.abs(x_model - x_km[j_model])))
-        d_lr = lr[:, jx] - np.log10(sim_rho)
-        d_lr -= d_lr.mean()  # static-shift invariant
-        d_ph = ph[:, jx] - sim_ph
-        err = np.sqrt(np.mean(d_lr**2 / 0.05**2 + (d_ph / 2.9) ** 2 / 2.0))
-        nrms_list.append(float(err))
+    # Legacy 1D-column diagnostic, explicitly referenced to literal TM.
+    lr, ph = modes["lr_tm"], modes["ph_tm"]
+    nrms_mean, nrms_list = section_nrms(
+        section,
+        lr,
+        ph,
+        modes["mask_tm"],
+        x_model,
+        x_km,
+        periods,
+        depth_grid,
+    )
 
     return {
+        "schema": "pimsr-2d-real-profile-diagnostic",
+        "schema_version": 1,
+        "comparison_status": "diagnostic_non_comparable",
+        "ranking_allowed": False,
+        "diagnostic_reasons": [
+            "the network consumes TE+TM but this legacy score evaluates only TM",
+            "the score re-simulates independent 1D columns rather than a 2D TE+TM forward",
+            "the physical field profile is normalized onto the synthetic model station grid",
+        ],
+        "metric_id": "section_nrms_1d_tm_masked_v2",
+        "mode": "TM/Zxy",
+        "inverse_observation_budget": ["TE/Zyx", "TM/Zxy"],
+        "scoring_observation_budget": ["TM/Zxy"],
         "profile": PROFILE_IDS,
-        "nrms_mean": float(np.mean(nrms_list)),
+        "geometry": profile_geometry_metadata(modes),
+        "nrms_mean": nrms_mean,
         "nrms_per_station": nrms_list,
         "section": section,
         "lr_obs": lr,
         "ph_obs": ph,
+        "period_mask": modes["mask_tm"],
         "x_model": x_model,
     }
 
