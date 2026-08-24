@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Run the trained PIMSR neural inverter on the synthetic test split and the
-real USArray stations, writing JSON results next to the Occam baselines.
+"""Run the legacy neural diagnostic on synthetic and USArray inputs.
+
+The outputs from this standalone runner are deliberately non-rankable.  Its
+synthetic neural path consumes gravity in addition to MT, unlike the legacy
+MT-only Occam baseline, and the real-data path has no resistivity ground truth.
 
 Usage:
     python scripts/run_neural_bench.py --checkpoint /path/to/best.pt \
@@ -10,17 +13,82 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import glob
 import json
-import os
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import h5py
 import numpy as np
 from pimsr_forward.mt1d import mt1d_response
+from pimsr_inversion.data import grid_cell_thicknesses
 
-from pimsr_benchmarks.emtf import parse_emtf_xml, resample_station
+from pimsr_benchmarks.emtf import parse_emtf_xml, resample_station_determinant
 from pimsr_benchmarks.metrics import coverage, profile_rmse, summarize
 from pimsr_benchmarks.neural import NeuralInverter
+from pimsr_benchmarks.runner2d import (
+    file_artifact_provenance,
+    publish_json_no_overwrite,
+    require_file_artifact_unchanged,
+)
+
+SCHEMA = "pimsr-legacy-1d-neural-diagnostic"
+SCHEMA_VERSION = 1
+
+
+def _xml_paths(emtf_dir: str | Path) -> tuple[Path, list[Path]]:
+    root = Path(emtf_dir).resolve(strict=True)
+    paths = sorted(path.resolve(strict=True) for path in root.glob("*.xml"))
+    if not paths:
+        raise ValueError(f"no EMTF XML inputs found in {root}")
+    return root, paths
+
+
+def _snapshot_xml_inputs(
+    emtf_dir: str | Path,
+) -> tuple[Path, list[dict[str, object]]]:
+    root, paths = _xml_paths(emtf_dir)
+    return root, [file_artifact_provenance(path) for path in paths]
+
+
+def _require_xml_inputs_unchanged(
+    root: Path,
+    provenance: Sequence[Mapping[str, object]],
+) -> None:
+    _, current_paths = _xml_paths(root)
+    expected_paths = [Path(str(item["path"])) for item in provenance]
+    if current_paths != expected_paths:
+        raise RuntimeError(f"EMTF XML input set changed after snapshot: {root}")
+    for item in provenance:
+        require_file_artifact_unchanged(item, role="EMTF XML input")
+
+
+def _require_output_paths_absent(paths: Sequence[Path]) -> None:
+    existing = [path for path in paths if path.exists() or path.is_symlink()]
+    if existing:
+        raise FileExistsError(
+            "refusing to overwrite existing diagnostic output(s): "
+            + ", ".join(str(path) for path in existing)
+        )
+
+
+def _diagnostic_result(
+    result: Mapping[str, object],
+    *,
+    provenance: Mapping[str, object],
+    reasons: Sequence[str],
+    inverse_observation_budget: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        **result,
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "comparison_status": "diagnostic_non_comparable",
+        "ranking_allowed": False,
+        "headline_claim_allowed": False,
+        "diagnostic_reasons": list(reasons),
+        "inverse_observation_budget": dict(inverse_observation_budget),
+        "provenance": dict(provenance),
+    }
 
 
 def mt_nrms(
@@ -35,23 +103,22 @@ def mt_nrms(
 ) -> float:
     """nRMS of the predicted profile's MT response against observations."""
     rho = np.power(10.0, log10_rho)
-    thick = np.diff(depth_grid)
+    thick = grid_cell_thicknesses(depth_grid)
     rho_a, phase = mt1d_response(rho, thick, periods)
     r_lr = (np.log10(rho_a) - obs_log_rho_a) / err_log_rho
-    r_ph = (phase - obs_phase) / err_phase_deg
+    r_ph = ((phase - obs_phase + 90.0) % 180.0 - 90.0) / err_phase_deg
     res = np.concatenate([r_lr, r_ph])
     if mask is not None:
         res = np.concatenate([r_lr[mask], r_ph[mask]])
     return float(np.sqrt(np.mean(res**2)))
 
 
-def bench_synthetic(
-    inv: NeuralInverter, test_h5: str, n: int
-) -> dict:
+def bench_synthetic(inv: NeuralInverter, test_h5: str, n: int) -> dict:
     with h5py.File(test_h5) as f:
+        inv.require_dataset(f)
         lr = f["obs_mt_log10_rho"][:n].astype(np.float64)
         ph = f["obs_mt_phase"][:n].astype(np.float64)
-        gz = f["obs_gravity_mgal"][:n].astype(np.float64)
+        gz = f["obs_gravity"][:n].astype(np.float64)
         tgt_res = f["target_log10_res"][:n]
         scen = f["scenario"][:n]
 
@@ -64,9 +131,7 @@ def bench_synthetic(
         times.append(p.wall_time_s)
         scen_hits.append(int(np.argmax(p.scenario_probs)) == int(scen[i]))
 
-    cov = coverage(
-        np.asarray(preds), np.asarray(sigmas), tgt_res
-    )
+    cov = coverage(np.asarray(preds), np.asarray(sigmas), tgt_res)
     return {
         "method": "pimsr-neural",
         "n": int(n),
@@ -81,15 +146,23 @@ def bench_synthetic(
     }
 
 
-def bench_real(inv: NeuralInverter, emtf_dir: str) -> dict:
+def bench_real(
+    inv: NeuralInverter,
+    emtf_dir: str,
+    *,
+    xml_paths: Sequence[str | Path] | None = None,
+) -> dict:
     stations = []
-    for path in sorted(glob.glob(os.path.join(emtf_dir, "*.xml"))):
+    paths = (
+        [Path(path) for path in xml_paths]
+        if xml_paths is not None
+        else _xml_paths(emtf_dir)[1]
+    )
+    for path in paths:
         st = parse_emtf_xml(path)
-        lr, ph, mask = resample_station(st, inv.periods)
+        lr, ph, mask = resample_station_determinant(st, inv.periods)
         p = inv.invert(lr, ph, gravity=None)
-        nrms = mt_nrms(
-            p.log10_rho, inv.depth_grid, inv.periods, lr, ph, mask=mask
-        )
+        nrms = mt_nrms(p.log10_rho, inv.depth_grid, inv.periods, lr, ph, mask=mask)
         stations.append(
             {
                 "station": st.station_id,
@@ -126,21 +199,72 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=500)
     args = ap.parse_args()
 
-    inv = NeuralInverter(args.checkpoint)
-    os.makedirs(args.out_dir, exist_ok=True)
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    output_paths = [out / "neural_synthetic.json", out / "neural_real.json"]
+    _require_output_paths_absent(output_paths)
 
-    syn = bench_synthetic(inv, args.test_h5, args.n)
-    with open(os.path.join(args.out_dir, "neural_synthetic.json"), "w") as fh:
-        json.dump(syn, fh, indent=2)
-    print(
-        json.dumps(
-            {k: v for k, v in syn.items() if k != "per_scenario_rmse"}, indent=2
-        )
+    checkpoint = file_artifact_provenance(args.checkpoint)
+    dataset = file_artifact_provenance(args.test_h5)
+    emtf_root, emtf_xml = _snapshot_xml_inputs(args.emtf_dir)
+
+    inv = NeuralInverter(str(checkpoint["path"]))
+    require_file_artifact_unchanged(checkpoint, role="neural checkpoint")
+
+    syn_metrics = bench_synthetic(inv, str(dataset["path"]), args.n)
+    require_file_artifact_unchanged(dataset, role="synthetic dataset")
+    require_file_artifact_unchanged(checkpoint, role="neural checkpoint")
+
+    real_metrics = bench_real(
+        inv,
+        str(emtf_root),
+        xml_paths=[str(item["path"]) for item in emtf_xml],
+    )
+    _require_xml_inputs_unchanged(emtf_root, emtf_xml)
+    require_file_artifact_unchanged(dataset, role="synthetic dataset")
+    require_file_artifact_unchanged(checkpoint, role="neural checkpoint")
+
+    syn = _diagnostic_result(
+        syn_metrics,
+        provenance={"checkpoint": checkpoint, "dataset": dataset},
+        reasons=(
+            "legacy standalone run has no validated versioned execution manifest",
+            (
+                "synthetic neural inversion consumes MT and gravity while the legacy "
+                "Occam reference consumes MT only"
+            ),
+            "unequal inverse observation budgets prohibit a method ranking",
+        ),
+        inverse_observation_budget={
+            "candidate": ["mt_apparent_resistivity", "mt_phase", "gravity"],
+            "legacy_occam_reference": ["mt_apparent_resistivity", "mt_phase"],
+            "equal": False,
+        },
+    )
+    real = _diagnostic_result(
+        real_metrics,
+        provenance={"checkpoint": checkpoint, "emtf_xml": emtf_xml},
+        reasons=(
+            "legacy standalone run has no validated versioned execution manifest",
+            "field stations have no resistivity ground truth for an inversion score",
+            (
+                "reported nRMS is forward consistency of the predicted model, not "
+                "reconstruction accuracy"
+            ),
+        ),
+        inverse_observation_budget={
+            "candidate": ["mt_apparent_resistivity", "mt_phase"],
+            "gravity_handling": "unobserved_mean_fill",
+            "equal_to_synthetic_path": False,
+        },
     )
 
-    real = bench_real(inv, args.emtf_dir)
-    with open(os.path.join(args.out_dir, "neural_real.json"), "w") as fh:
-        json.dump(real, fh, indent=2)
+    _require_output_paths_absent(output_paths)
+    publish_json_no_overwrite(syn, output_paths[0])
+    publish_json_no_overwrite(real, output_paths[1])
+    print(
+        json.dumps({k: v for k, v in syn.items() if k != "per_scenario_rmse"}, indent=2)
+    )
     print("real mean nRMS:", real["nrms"]["mean"])
 
 

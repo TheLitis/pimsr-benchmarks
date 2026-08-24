@@ -1,8 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "status": "legacy_non_comparable",
   "metric": {
-    "id": "section_nrms_2d",
-    "physics": "SimPEG 2D TE+TM forward consistency",
+    "id": "section_nrms_2d_legacy_zxy_unmasked_v1",
+    "physics": "SimPEG 2D Zxy-only forward consistency (historically labelled TE)",
+    "components": ["Zxy"],
+    "period_policy": "included edge-extrapolated periods",
+    "weighting": "legacy log-resistivity double weighting",
+    "comparable_to_current_metric": false,
     "ground_truth_claim": false,
     "forbid_metric_ids": ["station_nrms_1d", "column_nrms_1d"]
   },
@@ -24,6 +29,7 @@
   },
   "profiles": ["G", "H-YS", "I", "J", "K"],
   "limitations": [
+    "Legacy/non-comparable: Zxy-only score, edge period extrapolation and unequal rho/phase weighting",
     "Five real profiles from one region",
     "Adapted checkpoints use observations from evaluation profiles",
     "Real-data score is forward consistency, not geological ground-truth error",
