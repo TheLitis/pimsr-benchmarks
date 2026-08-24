@@ -13,7 +13,9 @@ import sys
 
 from pimsr_benchmarks.mtdlpy import (
     COMMON_RETRAIN_SEEDS,
+    DEFAULT_RECIPE_ID,
     IMAGENET_RESNET50_V1_SHA256,
+    TRAINING_RECIPES,
     run_common_retrain,
 )
 
@@ -43,6 +45,12 @@ def _parser() -> argparse.ArgumentParser:
         choices=COMMON_RETRAIN_SEEDS,
     )
     parser.add_argument("--device", required=True, choices=("cpu", "cuda"))
+    parser.add_argument(
+        "--recipe",
+        default=DEFAULT_RECIPE_ID,
+        choices=tuple(sorted(TRAINING_RECIPES)),
+        help="closed-set public-validation recipe; free hyperparameters are forbidden",
+    )
     parser.add_argument("--checkpoint-out", required=True)
     parser.add_argument("--predictions-out", required=True)
     parser.add_argument("--runtime-out", required=True)
@@ -65,6 +73,7 @@ def main(argv: list[str] | None = None) -> None:
         checkpoint_out=args.checkpoint_out,
         predictions_out=args.predictions_out,
         runtime_out=args.runtime_out,
+        recipe_id=args.recipe,
         command=command,
         runner_source=__file__,
     )

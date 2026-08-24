@@ -59,13 +59,55 @@ INPUT_GRID_SHAPE = (8, 12)
 NETWORK_GRID_SHAPE = (32, 32)
 OUTPUT_GRID_SHAPE = (64, 48)
 
-EPOCHS = 10
-BATCH_SIZE = 4
-LEARNING_RATE = 1e-4
 ADAM_BETAS = (0.9, 0.999)
 ADAM_EPS = 1e-8
 WEIGHT_DECAY = 0.0
 GRAD_CLIP_NORM = 0.1
+
+
+@dataclass(frozen=True)
+class TrainingRecipe:
+    """A named, immutable MTDLPy training schedule selected before scoring."""
+
+    recipe_id: str
+    epochs: int
+    batch_size: int
+    learning_rate: float
+    schedule_origin: str
+
+
+REVIEWED_RECIPE = TrainingRecipe(
+    recipe_id="benchmark_reviewed_v1",
+    epochs=10,
+    batch_size=4,
+    learning_rate=1e-4,
+    schedule_origin=(
+        "preregistered benchmark-native reviewed adapter schedule; "
+        "not an MTDLPy upstream default"
+    ),
+)
+UPSTREAM_CONFIG_RECIPE = TrainingRecipe(
+    recipe_id="upstream_paramconfig_b01f72a_v1",
+    epochs=200,
+    batch_size=8,
+    learning_rate=1e-8,
+    schedule_origin=(
+        "verbatim active Epochs, BatchSize and LearnRate values in pinned "
+        "MTDLPy ParamConfig.py; best-validation selection and no scheduler "
+        "match pinned MT_train.py"
+    ),
+)
+TRAINING_RECIPES = {
+    recipe.recipe_id: recipe
+    for recipe in (REVIEWED_RECIPE, UPSTREAM_CONFIG_RECIPE)
+}
+DEFAULT_RECIPE_ID = REVIEWED_RECIPE.recipe_id
+
+# Backwards-compatible aliases for the reviewed development recipe. Production
+# run manifests always carry the explicit recipe id and resolved values.
+EPOCHS = REVIEWED_RECIPE.epochs
+BATCH_SIZE = REVIEWED_RECIPE.batch_size
+LEARNING_RATE = REVIEWED_RECIPE.learning_rate
 
 PREDICTION_SCHEMA = "pimsr-sota-2d-predictions"
 PREDICTION_SCHEMA_VERSION = 2
@@ -112,6 +154,15 @@ _OBSERVATION_KEYS = (
 
 class MTDLPyAdapterError(RuntimeError):
     """Raised when an MTDLPy run cannot prove its comparison contract."""
+
+
+def training_recipe(recipe_id: str) -> TrainingRecipe:
+    """Resolve one closed-set recipe id without accepting free hyperparameters."""
+    if not isinstance(recipe_id, str) or recipe_id not in TRAINING_RECIPES:
+        raise ValueError(
+            f"recipe_id must be one of {tuple(sorted(TRAINING_RECIPES))}"
+        )
+    return TRAINING_RECIPES[recipe_id]
 
 
 @dataclass(frozen=True)
@@ -703,6 +754,7 @@ def _train_and_predict(
     *,
     seed: int,
     device_name: str,
+    recipe: TrainingRecipe,
 ) -> TrainingOutcome:
     backend_start = time.perf_counter()
     import torch
@@ -733,7 +785,7 @@ def _train_and_predict(
     model.to(device)
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=LEARNING_RATE,
+        lr=recipe.learning_rate,
         betas=ADAM_BETAS,
         eps=ADAM_EPS,
         weight_decay=WEIGHT_DECAY,
@@ -744,7 +796,7 @@ def _train_and_predict(
             torch.from_numpy(observations_train),
             torch.from_numpy(targets_train[:, None]),
         ),
-        batch_size=BATCH_SIZE,
+        batch_size=recipe.batch_size,
         shuffle=True,
         generator=generator,
         num_workers=0,
@@ -755,7 +807,7 @@ def _train_and_predict(
             torch.from_numpy(observations_validation),
             torch.from_numpy(targets_validation[:, None]),
         ),
-        batch_size=BATCH_SIZE,
+        batch_size=recipe.batch_size,
         shuffle=False,
         num_workers=0,
         drop_last=False,
@@ -769,7 +821,7 @@ def _train_and_predict(
     best_state: dict[str, Any] | None = None
     history: list[dict[str, object]] = []
     training_start = time.perf_counter()
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(1, recipe.epochs + 1):
         model.train()
         train_loss_sum = 0.0
         train_count = 0
@@ -843,9 +895,9 @@ def _train_and_predict(
     inference_start = time.perf_counter()
     prediction_batches: list[np.ndarray] = []
     with torch.no_grad():
-        for start in range(0, observations_test.shape[0], BATCH_SIZE):
+        for start in range(0, observations_test.shape[0], recipe.batch_size):
             batch = torch.from_numpy(
-                observations_test[start : start + BATCH_SIZE]
+                observations_test[start : start + recipe.batch_size]
             ).to(device)
             prediction = model(batch)
             expected = (batch.shape[0], 1, *NETWORK_GRID_SHAPE)
@@ -1070,6 +1122,7 @@ def run_common_retrain(
     checkpoint_out: str | Path,
     predictions_out: str | Path,
     runtime_out: str | Path,
+    recipe_id: str = DEFAULT_RECIPE_ID,
     command: Sequence[str] | None = None,
     runner_source: str | Path | None = None,
 ) -> dict[str, object]:
@@ -1078,6 +1131,7 @@ def run_common_retrain(
         raise ValueError(f"seed must be one of {COMMON_RETRAIN_SEEDS}")
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'")
+    recipe = training_recipe(recipe_id)
     destinations, parts = _output_paths(
         checkpoint_out, predictions_out, runtime_out
     )
@@ -1118,6 +1172,7 @@ def run_common_retrain(
         weights,
         seed=seed,
         device_name=device,
+        recipe=recipe,
     )
     predictions = np.asarray(outcome.predicted_log10_resistivity, dtype="<f4")
     expected_prediction_shape = (test.sample_index.size, *OUTPUT_GRID_SHAPE)
@@ -1135,12 +1190,13 @@ def run_common_retrain(
 
     training_config = {
         "campaign_seeds": list(COMMON_RETRAIN_SEEDS),
+        "recipe_id": recipe.recipe_id,
         "seed": seed,
-        "epochs": EPOCHS,
-        "batch_size": BATCH_SIZE,
+        "epochs": recipe.epochs,
+        "batch_size": recipe.batch_size,
         "optimizer": {
             "name": "Adam",
-            "learning_rate": LEARNING_RATE,
+            "learning_rate": recipe.learning_rate,
             "betas": list(ADAM_BETAS),
             "eps": ADAM_EPS,
             "weight_decay": WEIGHT_DECAY,
@@ -1151,10 +1207,7 @@ def run_common_retrain(
         "loss": "mean_squared_error_mean",
         "checkpoint_selection": "lowest validation MSE; strict less-than; first tie",
         "normalization": "none",
-        "schedule_origin": (
-            "preregistered benchmark-native reviewed adapter schedule; "
-            "not an MTDLPy upstream default"
-        ),
+        "schedule_origin": recipe.schedule_origin,
     }
     preprocessing = {
         "input_channel_order": list(OBSERVATION_CHANNEL_ORDER),
@@ -1337,13 +1390,19 @@ def run_common_retrain(
 
 __all__ = [
     "COMMON_RETRAIN_SEEDS",
+    "DEFAULT_RECIPE_ID",
+    "REVIEWED_RECIPE",
+    "TRAINING_RECIPES",
+    "UPSTREAM_CONFIG_RECIPE",
     "HeldoutObservations",
     "MTDLPyAdapterError",
+    "TrainingRecipe",
     "TrainingSplit",
     "load_heldout_observations",
     "load_training_split",
     "resize_bilinear_half_pixel",
     "run_common_retrain",
+    "training_recipe",
     "validate_local_imagenet_weights",
     "verify_pinned_repository",
 ]

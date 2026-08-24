@@ -419,6 +419,26 @@ def test_determinism_seeds_python_numpy_and_torch(monkeypatch: pytest.MonkeyPatc
     assert _Torch.backends.cuda.matmul.allow_tf32 is False
 
 
+def test_training_recipes_pin_reviewed_and_verbatim_upstream_schedules():
+    assert mtdlpy.DEFAULT_RECIPE_ID == "benchmark_reviewed_v1"
+    assert mtdlpy.training_recipe(mtdlpy.DEFAULT_RECIPE_ID) == mtdlpy.TrainingRecipe(
+        recipe_id="benchmark_reviewed_v1",
+        epochs=10,
+        batch_size=4,
+        learning_rate=1e-4,
+        schedule_origin=mtdlpy.REVIEWED_RECIPE.schedule_origin,
+    )
+    assert mtdlpy.UPSTREAM_CONFIG_RECIPE == mtdlpy.TrainingRecipe(
+        recipe_id="upstream_paramconfig_b01f72a_v1",
+        epochs=200,
+        batch_size=8,
+        learning_rate=1e-8,
+        schedule_origin=mtdlpy.UPSTREAM_CONFIG_RECIPE.schedule_origin,
+    )
+    with pytest.raises(ValueError, match="recipe_id must be one of"):
+        mtdlpy.training_recipe("test-tuned")
+
+
 def test_common_retrain_publishes_exact_prediction_contract_and_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -536,6 +556,7 @@ def test_common_retrain_publishes_exact_prediction_contract_and_runtime(
         "eps": 1e-8,
         "weight_decay": 0.0,
     }
+    assert published["training_config"]["recipe_id"] == mtdlpy.DEFAULT_RECIPE_ID
     assert published["training_config"]["normalization"] == "none"
     assert published["preprocessing"]["test_tuning"] is False
     assert published["preprocessing"]["transpose_observations"] is True
