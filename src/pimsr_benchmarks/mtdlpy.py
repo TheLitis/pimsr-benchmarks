@@ -120,6 +120,7 @@ class TrainingSplit:
     observations: np.ndarray
     targets: np.ndarray
     sample_index: np.ndarray
+    generator_seed: int
     frequencies: np.ndarray
     station_x: np.ndarray
     x_grid: np.ndarray
@@ -312,6 +313,7 @@ def load_training_split(path: str | Path, *, role: str) -> TrainingSplit:
 
     with h5py.File(artifact_path, "r") as h5:
         contract = validate_dataset2d(h5)
+        generator_seed = int(np.asarray(h5.attrs["generator_seed"]).item())
         observations = np.stack(
             [
                 h5["obs_mt_log10_rho"][:],
@@ -346,6 +348,7 @@ def load_training_split(path: str | Path, *, role: str) -> TrainingSplit:
         observations=observations,
         targets=targets,
         sample_index=sample_index,
+        generator_seed=generator_seed,
         frequencies=frequencies,
         station_x=station_x,
         x_grid=x_grid,
@@ -538,17 +541,12 @@ def _require_disjoint_samples(
     validation: TrainingSplit,
     test: HeldoutObservations,
 ) -> None:
-    entries = (
-        ("train", train.sample_index),
-        ("validation", validation.sample_index),
-        ("held-out", test.sample_index),
-    )
-    for index, (left_name, left_values) in enumerate(entries):
-        for right_name, right_values in entries[index + 1 :]:
-            if np.intersect1d(left_values, right_values).size:
-                raise MTDLPyAdapterError(
-                    f"{left_name} and {right_name} sample_index values overlap"
-                )
+    if train.generator_seed == validation.generator_seed and np.intersect1d(
+        train.sample_index, validation.sample_index
+    ).size:
+        raise MTDLPyAdapterError(
+            "train and validation (generator_seed, sample_index) identities overlap"
+        )
     identities = [entry.provenance["sha256"] for entry in (train, validation, test)]
     if len(set(identities)) != len(identities):
         raise MTDLPyAdapterError("train, validation and held-out artifacts must differ")
@@ -1135,8 +1133,16 @@ def run_common_retrain(
         "source": repository,
         "imagenet_weights": weights,
         "dataset_identities": {
-            "train": dict(train.provenance),
-            "validation": dict(validation.provenance),
+            "train": {
+                **dict(train.provenance),
+                "generator_seed": train.generator_seed,
+                "sample_identity": "(generator_seed,sample_index)",
+            },
+            "validation": {
+                **dict(validation.provenance),
+                "generator_seed": validation.generator_seed,
+                "sample_identity": "(generator_seed,sample_index)",
+            },
             "heldout_observations": dict(test.provenance),
         },
         "heldout_truth_available_to_adapter": False,

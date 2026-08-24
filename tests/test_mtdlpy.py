@@ -249,6 +249,7 @@ def test_training_loader_uses_schema_v2_four_channel_te_tm_order(tmp_path: Path)
     split = load_training_split(path, role="training fixture")
     assert split.observations.shape == (2, 4, 8, 12)
     assert split.targets.shape == (2, 64, 48)
+    assert split.generator_seed == 91
     assert split.observations[0, :, 0, 0].tolist() == pytest.approx(
         [1.0, 20.0, 1.5, 40.0]
     )
@@ -283,12 +284,13 @@ def test_observation_preprocessing_matches_upstream_resize_then_transpose():
     assert not np.array_equal(transformed, resized)
 
 
-def _split(path: Path, start: int) -> TrainingSplit:
-    path.write_bytes(f"split-{start}".encode())
+def _split(path: Path, start: int, *, generator_seed: int = 91) -> TrainingSplit:
+    path.write_bytes(f"split-{generator_seed}-{start}".encode())
     return TrainingSplit(
         observations=np.ones((2, 4, 8, 12), dtype=np.float32),
         targets=np.ones((2, 64, 48), dtype=np.float32),
         sample_index=np.arange(start, start + 2, dtype=np.int64),
+        generator_seed=generator_seed,
         frequencies=np.geomspace(0.01, 100.0, 8),
         station_x=np.linspace(0.0, 11_000.0, 12),
         x_grid=np.linspace(-500.0, 11_500.0, 48),
@@ -309,6 +311,22 @@ def _heldout(path: Path) -> HeldoutObservations:
         depth_grid=np.geomspace(10.0, 10_000.0, 64),
         provenance=file_artifact_provenance(path),
     )
+
+
+def test_split_identity_includes_generator_seed(tmp_path: Path):
+    heldout = _heldout(tmp_path / "observations.npz")
+    train = _split(tmp_path / "train.h5", 10, generator_seed=91)
+    same_indices_new_campaign = _split(
+        tmp_path / "validation-new-campaign.h5", 10, generator_seed=92
+    )
+
+    mtdlpy._require_disjoint_samples(train, same_indices_new_campaign, heldout)
+
+    overlapping_same_campaign = _split(
+        tmp_path / "validation-overlap.h5", 11, generator_seed=91
+    )
+    with pytest.raises(MTDLPyAdapterError, match="identities overlap"):
+        mtdlpy._require_disjoint_samples(train, overlapping_same_campaign, heldout)
 
 
 def test_common_retrain_publishes_exact_prediction_contract_and_runtime(
