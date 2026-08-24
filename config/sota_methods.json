@@ -576,6 +576,72 @@
       ]
     },
     {
+      "id": "mffd_unet",
+      "name": "Improved DenseUNet (MFFD-UNet)",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "2-D Magnetotelluric Inversion Based on Improved DenseUNet",
+          "doi": "10.1109/ACCESS.2026.3667537",
+          "url": "https://doi.org/10.1109/ACCESS.2026.3667537"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_checkpoint_and_training_data",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "The article reports MFFD-UNet experiments on 200,000 finite-element synthetic samples, but no independently runnable source, checkpoint or exact training corpus was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The article is available under its publication terms, but no external software artifact was identified and no software license could be verified."
+      },
+      "caveats": [
+        "Reported comparisons against U-Net, DenseUNet and Res-FormerNet use the authors' dataset and remain contextual rather than commensurate with common retraining.",
+        "Do not reconstruct an unofficial implementation and label it MFFD-UNet without author-verified source and preprocessing."
+      ]
+    },
+    {
+      "id": "mt2d_autodiff",
+      "name": "2D MT Automatic-Differentiation Inversion",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "2D MT inversion based on automatic differentiation",
+          "doi": "10.1016/j.bdes.2026.100065",
+          "url": "https://doi.org/10.1016/j.bdes.2026.100065"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_reproduction_data",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "The article describes a PyTorch differentiable TE/TM finite-difference inversion and states that associated data are available from the corresponding author; no independently runnable source or immutable reproduction bundle was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The open-access article does not establish a license for unavailable implementation source."
+      },
+      "caveats": [
+        "This is an observation-specific optimization method; executable comparison requires exact source, initialization, objective, optimizer and stopping rules.",
+        "Synthetic and COPROD2 results remain contextual until an immutable implementation and reproduction data are available."
+      ]
+    },
+    {
       "id": "mt_mamba",
       "name": "MT-Mamba",
       "dimensionality": ["3d"],

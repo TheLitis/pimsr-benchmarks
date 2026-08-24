@@ -46,6 +46,8 @@ def test_repository_registry_is_valid_and_complete():
         "guided_1d",
         "res_formernet",
         "mt2d_inr",
+        "mffd_unet",
+        "mt2d_autodiff",
         "mt_mamba",
         "p_physinv",
         "mt2dinv_unet",
@@ -70,7 +72,7 @@ def test_repository_registry_is_valid_and_complete():
 def test_registry_cli_reports_valid_summary(capsys):
     assert main([str(REGISTRY_PATH)]) == 0
     assert capsys.readouterr().out.strip() == (
-        "valid pimsr-sota-methods schema=2 methods=21 datasets=7"
+        "valid pimsr-sota-methods schema=2 methods=23 datasets=7"
     )
 
 
@@ -282,6 +284,19 @@ def test_registry_does_not_overstate_dense_or_gemmie_artifacts(registry):
     gemmie = methods["gemmie"]
     assert gemmie["artifacts"][0]["kind"] == "synthetic_impedance_dataset"
     assert "not source code" in gemmie["artifacts"][0]["caveat"]
+
+
+def test_recent_2d_methods_without_reproduction_bundles_stay_paper_only(registry):
+    methods = {method["id"]: method for method in registry["methods"]}
+    for method_id in ("mffd_unet", "mt2d_autodiff"):
+        method = methods[method_id]
+        assert method["status"] == "paper_only"
+        assert method["tracks"] == []
+        assert method["source"] is None
+        assert any(
+            artifact["availability"] == "unavailable"
+            for artifact in method["artifacts"]
+        )
 
 
 def test_invalid_json_is_reported_as_registry_error(tmp_path):
