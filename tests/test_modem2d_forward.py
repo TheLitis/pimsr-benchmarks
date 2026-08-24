@@ -106,6 +106,24 @@ def test_mesh_configs_are_explicit_hashable_and_include_ultra2():
     assert ultra2.padding_perturbation().padding_count_each_side == 24
 
 
+def test_canonical_public_axes_are_bitwise_frozen_and_return_copies():
+    depth = modem.canonical_depth_centres_m()
+    frequencies = modem.canonical_frequencies_hz()
+
+    assert depth.shape == (64,)
+    assert frequencies.shape == (8,)
+    assert hashlib.sha256(depth.tobytes()).hexdigest() == (
+        modem.CANONICAL_DEPTH_CENTRES_SHA256
+    )
+    assert hashlib.sha256(frequencies.tobytes()).hexdigest() == (
+        modem.CANONICAL_FREQUENCIES_SHA256
+    )
+    depth[0] = -1.0
+    frequencies[0] = -1.0
+    assert modem.canonical_depth_centres_m()[0] == 10.0
+    assert modem.canonical_frequencies_hz()[0] == 0.01
+
+
 def test_nested_mesh_pair_has_identical_domain_and_exact_factor_two_cells(
     truth: modem.CanonicalTruth, monkeypatch: pytest.MonkeyPatch
 ):

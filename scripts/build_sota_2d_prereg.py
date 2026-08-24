@@ -12,6 +12,10 @@ from typing import Any
 import numpy as np
 
 from pimsr_benchmarks import comparison2d, densenet2d, mtdlpy
+from pimsr_benchmarks.modem2d_forward import (
+    canonical_depth_centres_m,
+    canonical_frequencies_hz,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 FORWARD_COMMIT = "dc36edac75dbd51cc92679a35f38d42d0e276299"
@@ -99,8 +103,8 @@ def _load_json(artifact: dict[str, Any], *, role: str) -> dict[str, Any]:
 
 
 def _analytic_contract() -> dict[str, Any]:
-    frequencies = np.geomspace(0.01, 100.0, 8).astype("<f8")
-    depth = np.logspace(np.log10(10.0), np.log10(60_000.0), 64).astype("<f8")
+    frequencies = canonical_frequencies_hz()
+    depth = canonical_depth_centres_m()
     return {
         "schema": "pimsr-modem2d-analytic-1d-contract",
         "schema_version": 1,

@@ -189,8 +189,8 @@ def _headline_evidence(
 
 
 def _analytic_contract() -> dict:
-    frequencies = np.geomspace(0.01, 100.0, 8).astype("<f8")
-    depth = np.logspace(np.log10(10.0), np.log10(60_000.0), 64).astype("<f8")
+    frequencies = modem2d_forward.canonical_frequencies_hz()
+    depth = modem2d_forward.canonical_depth_centres_m()
     return {
         "schema": "pimsr-modem2d-analytic-1d-contract",
         "schema_version": 1,

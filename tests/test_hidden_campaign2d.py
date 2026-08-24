@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from pimsr_geogen.model import DEFAULT_DEPTH_GRID
 from pimsr_geogen.section2d import DEFAULT_X_GRID
 
 from pimsr_benchmarks import evaluation2d, prediction_lock2d
@@ -45,6 +44,8 @@ from pimsr_benchmarks.modem2d_forward import (
     MESH_CONFIGS,
     ArtifactSnapshot,
     ModEMResponse,
+    canonical_depth_centres_m,
+    canonical_frequencies_hz,
 )
 from pimsr_benchmarks.prediction_lock2d import snapshot_regular_file
 
@@ -80,8 +81,8 @@ def _geometry(tmp_path: Path) -> CampaignGeometry2D:
     )
     return CampaignGeometry2D(
         x_cell_centers_m=DEFAULT_X_GRID.astype("<f8"),
-        depth_cell_centers_m=DEFAULT_DEPTH_GRID.astype("<f8"),
-        frequencies_hz=np.geomspace(0.01, 100.0, 8).astype("<f8"),
+        depth_cell_centers_m=canonical_depth_centres_m(),
+        frequencies_hz=canonical_frequencies_hz(),
         station_x_m=np.linspace(-10_000.0, 10_000.0, 12, dtype="<f8"),
         source=source,
     )
