@@ -1,6 +1,6 @@
 # PIMSR SOTA comparison protocol
 
-Version: 1.0 (2026-08-23)  
+Version: 1.0 (2026-08-23)
 Registry schema: `config/sota_methods.json`, version 1
 
 ## Purpose and admissibility
