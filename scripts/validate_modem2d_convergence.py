@@ -40,6 +40,7 @@ PUBLIC_GENERATOR_SEED = 20260820
 PUBLIC_GENERATION_CONTRACT = "pimsr-geogen.SectionGenerator/default-grid/v1"
 PUBLIC_FORWARD_CONTRACT = "pimsr-forward.MT2DForward/default-mesh/v2"
 SCENARIO_NAMES = ("background", "aquifer", "hydrocarbon", "salt", "geothermal")
+PUBLIC_SAMPLES_PER_FAMILY = 5
 PRODUCTION_MESH = MESH_CONFIGS["nested-production-v1"]
 NEXT_FINER_REFERENCE = MESH_CONFIGS["nested-reference-x2-v1"]
 RAW_RUN_SET_SCHEMA = "pimsr-modem2d-public-convergence-raw-run-set"
@@ -81,8 +82,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--per-family",
         type=int,
-        default=5,
-        help="public truths per family; headline qualification requires at least 5",
+        default=PUBLIC_SAMPLES_PER_FAMILY,
+        help="frozen public truths per family; must be exactly 5",
     )
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=3_600.0)
@@ -116,7 +117,7 @@ def _catalog_public_shard(path: Path) -> tuple[list[PublicSelection], dict[str, 
     _reject_nonpublic_path(path)
     source = snapshot_file(path, role="public convergence HDF5 shard")
     selections: list[PublicSelection] = []
-    with h5py.File(source.path, "r") as h5:
+    with h5py.File(io.BytesIO(source.payload), "r") as h5:
         checks = {
             "schema": h5.attrs.get("schema") == "pimsr-mt-2d",
             "schema_version": int(h5.attrs.get("schema_version", -1)) == 2,
@@ -412,6 +413,14 @@ def validate(
     dict[str, object],
     dict[str, bytes],
 ]:
+    if args.per_family != PUBLIC_SAMPLES_PER_FAMILY:
+        raise ValueError(
+            "--per-family is frozen at 5 for the exact 25x3+4+1 raw-run contract"
+        )
+    if args.jobs <= 0 or args.jobs > 4:
+        raise ValueError("--jobs must be between 1 and 4")
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0.0:
+        raise ValueError("--timeout-seconds must be finite and positive")
     validator_snapshot = snapshot_file(__file__, role="convergence validator source")
     bridge_snapshot = snapshot_file(
         Path(__file__).resolve().parents[1]
@@ -420,13 +429,11 @@ def validate(
         / "modem2d_forward.py",
         role="ModEM bridge source",
     )
-    if args.jobs <= 0 or args.jobs > 4:
-        raise ValueError("--jobs must be between 1 and 4")
-    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0.0:
-        raise ValueError("--timeout-seconds must be finite and positive")
     selected, shard_records = select_public_geologies(
         args.public_shard, per_family=args.per_family
     )
+    if len(selected) != len(SCENARIO_NAMES) * PUBLIC_SAMPLES_PER_FAMILY:
+        raise RuntimeError("public convergence selection must contain exactly 25 truths")
     work_root = args.work_root.resolve()
     if work_root.exists():
         raise FileExistsError(f"refusing to reuse convergence work root: {work_root}")

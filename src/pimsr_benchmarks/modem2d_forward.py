@@ -164,9 +164,9 @@ def snapshot_file(path: str | Path, *, role: str) -> ArtifactSnapshot:
     try:
         descriptor = os.open(requested, flags)
         opened = os.fstat(descriptor)
-        if (
-            not stat_module.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        if not stat_module.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
         ):
             raise RuntimeError(f"{role} changed before descriptor open: {requested}")
         chunks: list[bytes] = []
@@ -470,9 +470,7 @@ class NestedMeshConfig:
                 self.minimum_vertical_subdivisions,
                 math.ceil(actual_width / self.maximum_base_dz_m),
             )
-            base.append(
-                np.full(count, actual_width / count, dtype=np.float64)
-            )
+            base.append(np.full(count, actual_width / count, dtype=np.float64))
             current_depth += actual_width
         return np.concatenate(base)
 
@@ -481,12 +479,8 @@ class NestedMeshConfig:
     ) -> tuple[np.ndarray, np.ndarray]:
         if depth_centres_m is None:
             raise ValueError("nested mesh construction requires canonical depth centres")
-        core = np.full(
-            self.base_core_count, self.base_core_width_m, dtype=np.float64
-        )
-        exponent = np.arange(
-            1, self.base_padding_count_each_side + 1, dtype=np.float64
-        )
+        core = np.full(self.base_core_count, self.base_core_width_m, dtype=np.float64)
+        exponent = np.arange(1, self.base_padding_count_each_side + 1, dtype=np.float64)
         near_to_far = self.base_core_width_m * self.base_padding_growth**exponent
         base_dy = np.concatenate((near_to_far[::-1], core, near_to_far))
         base_dz = self._base_vertical_widths(depth_centres_m)
@@ -1416,11 +1410,15 @@ def publish_artifact_bundle(
     published: list[tuple[Path, tuple[int, int, int, int]]] = []
     destination_created = False
     try:
-        staged: dict[str, Path] = {}
+        staged: dict[str, tuple[Path, ArtifactSnapshot]] = {}
         for name, payload in artifacts.items():
             staged_path = stage / name
-            _write_bytes_exclusive(staged_path, payload)
-            staged[name] = staged_path
+            staged_snapshot = _write_bytes_exclusive(staged_path, payload)
+            if staged_snapshot.payload != payload:
+                raise PublicationError(
+                    f"staged publication artifact differs from requested bytes: {name}"
+                )
+            staged[name] = (staged_path, staged_snapshot)
         try:
             destination.mkdir()
         except FileExistsError as exc:
@@ -1433,13 +1431,33 @@ def publish_artifact_bundle(
         ]
         for name in publish_order:
             target = destination / name
+            staged_path, staged_snapshot = staged[name]
+            require_snapshot_unchanged(
+                staged_snapshot, role=f"staged publication artifact {name}"
+            )
             try:
-                os.link(staged[name], target)
+                os.link(staged_path, target)
             except FileExistsError as exc:
                 raise FileExistsError(
                     f"publication race for ModEM artifact: {target}"
                 ) from exc
-            published.append((target, _stat_signature(target)))
+            target_signature = _stat_signature(target)
+            published.append((target, target_signature))
+            if target_signature != staged_snapshot.stat_signature:
+                raise PublicationError(
+                    f"staged publication artifact changed while linking: {name}"
+                )
+            target_snapshot = snapshot_file(
+                target, role=f"linked publication artifact {name}"
+            )
+            if (
+                target_snapshot.sha256 != staged_snapshot.sha256
+                or target_snapshot.size_bytes != staged_snapshot.size_bytes
+                or target_snapshot.stat_signature != staged_snapshot.stat_signature
+            ):
+                raise PublicationError(
+                    f"linked publication artifact differs from staged bytes: {name}"
+                )
         shutil.rmtree(stage)
         return destination
     except BaseException as original:
@@ -1575,9 +1593,18 @@ def run_modem_forward(
         runtime.require_unchanged()
         require_snapshot_unchanged(bridge_snapshot, role="ModEM bridge source")
 
-        model_bytes = model_snapshot.path.read_bytes()
-        template_bytes = template_snapshot.path.read_bytes()
-        forward_bytes = (solver_dir / "forward.dat").read_bytes()
+        forward_snapshot = snapshot_file(
+            solver_dir / "forward.dat", role="ModEM response selected for publication"
+        )
+        response_artifact = response_record["artifact"]
+        if not isinstance(response_artifact, Mapping) or (
+            response_artifact.get("sha256") != forward_snapshot.sha256
+            or response_artifact.get("size_bytes") != forward_snapshot.size_bytes
+        ):
+            raise RuntimeError("ModEM response changed after validated parsing")
+        model_bytes = model_snapshot.payload
+        template_bytes = template_snapshot.payload
+        forward_bytes = forward_snapshot.payload
         response_bytes = response.npz_bytes()
         stdout_bytes = process.stdout.encode("utf-8")
         stderr_bytes = process.stderr.encode("utf-8")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -152,9 +153,7 @@ def test_nested_mesh_pair_has_identical_domain_and_exact_factor_two_cells(
     assert reference_dz.size == 392
     assert candidate_dz.sum() == pytest.approx(220_000.0, abs=1e-7)
     assert reference_dz.sum() == pytest.approx(220_000.0, abs=1e-7)
-    internal_boundaries = 0.5 * (
-        canonical_depth[:-1] + canonical_depth[1:]
-    )
+    internal_boundaries = 0.5 * (canonical_depth[:-1] + canonical_depth[1:])
     candidate_edges = np.cumsum(candidate_dz)
     for boundary in internal_boundaries:
         assert np.min(np.abs(candidate_edges - boundary)) < 1e-9
@@ -162,9 +161,7 @@ def test_nested_mesh_pair_has_identical_domain_and_exact_factor_two_cells(
     mapped_candidate, _, _ = modem.mapped_model(truth, candidate)
     mapped_production, _, _ = modem.mapped_model(truth, vertical)
     mapped_reference, _, _ = modem.mapped_model(truth, reference)
-    expected_reference = np.repeat(
-        np.repeat(mapped_candidate, 2, axis=0), 2, axis=1
-    )
+    expected_reference = np.repeat(np.repeat(mapped_candidate, 2, axis=0), 2, axis=1)
     assert np.array_equal(mapped_reference, expected_reference)
     assert np.array_equal(
         mapped_reference,
@@ -471,6 +468,32 @@ def test_atomic_bundle_rolls_back_on_link_failure(
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_atomic_bundle_rejects_staged_payload_mutation_during_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    destination = tmp_path / "mutated-stage"
+    real_link = os.link
+    mutated = False
+
+    def mutate_then_link(source: Path, target: Path) -> None:
+        nonlocal mutated
+        if not mutated:
+            source.write_bytes(b"tampered-stage-payload")
+            mutated = True
+        real_link(source, target)
+
+    monkeypatch.setattr(modem.os, "link", mutate_then_link)
+    with pytest.raises(modem.PublicationError, match="changed while linking"):
+        modem.publish_artifact_bundle(
+            destination,
+            {"data.bin": b"data", "provenance.json": b"manifest"},
+            manifest_name="provenance.json",
+        )
+    assert mutated is True
+    assert not destination.exists()
+    assert not list(tmp_path.glob("*.part"))
+
+
 def test_atomic_bundle_rejects_dangling_output_symlink(tmp_path: Path):
     destination = tmp_path / "result"
     try:
@@ -526,3 +549,50 @@ def test_run_forward_rejects_preexisting_output_without_solver(
             output_dir=output,
             source_provenance={},
         )
+
+
+def test_run_forward_publishes_only_verified_snapshot_payloads(
+    tmp_path: Path,
+    truth: modem.CanonicalTruth,
+    small_mesh: modem.MeshConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime = SimpleNamespace(
+        record={},
+        identity_sha256="0" * 64,
+        require_unchanged=lambda: None,
+    )
+    response_payload = _response_text(truth, small_mesh)
+
+    def fake_solver(
+        _runtime: object,
+        *,
+        input_dir: Path,
+        solver_dir: Path,
+        timeout_seconds: float,
+    ):
+        del input_dir, timeout_seconds
+        (solver_dir / "forward.dat").write_text(
+            response_payload, encoding="ascii", newline="\n"
+        )
+        return subprocess.CompletedProcess([], 0, "stdout", ""), ["fake"], 0.01
+
+    monkeypatch.setattr(modem, "_run_solver", fake_solver)
+
+    def reject_path_reopen(_path: Path) -> bytes:
+        raise AssertionError("verified artifacts must not be reopened by pathname")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_path_reopen)
+    published, _response, provenance = modem.run_modem_forward(
+        runtime=runtime,
+        truth=truth,
+        mesh=small_mesh,
+        output_dir=tmp_path / "published",
+        source_provenance={"scope": "public_test"},
+    )
+
+    assert published.is_dir()
+    assert (
+        provenance["outputs"]["forward.dat"]["sha256"]
+        == hashlib.sha256(response_payload.encode("ascii")).hexdigest()
+    )
