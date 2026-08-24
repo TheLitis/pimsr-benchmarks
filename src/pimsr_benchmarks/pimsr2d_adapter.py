@@ -36,7 +36,7 @@ PREDICTION_SCHEMA = "pimsr-sota-2d-predictions"
 RUNTIME_SCHEMA = "pimsr-sota-2d-pimsr-runtime"
 OBSERVATION_SCHEMA_VERSION = 1
 PREDICTION_SCHEMA_VERSION = 2
-RUNTIME_SCHEMA_VERSION = 1
+RUNTIME_SCHEMA_VERSION = 2
 CHECKPOINT_SCHEMA = "pimsr-train-2d"
 CHECKPOINT_SCHEMA_VERSION = 1
 
@@ -1254,6 +1254,7 @@ def run_pimsr2d_inference(
             "schema": RUNTIME_SCHEMA,
             "schema_version": RUNTIME_SCHEMA_VERSION,
             "method": "pimsr-2d",
+            "training_seed": int(state["training_config"]["seed"]),
             "inputs": {
                 "observations": {
                     "schema": OBSERVATION_SCHEMA,

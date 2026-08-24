@@ -278,7 +278,8 @@ def test_cpu_inference_emits_evaluator_prediction_and_runtime(tmp_path: Path):
     assert np.isfinite(predictions.log10_resistivity).all()
     report = json.loads(runtime.read_text(encoding="utf-8"))
     assert report["schema"] == RUNTIME_SCHEMA
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
+    assert report["training_seed"] == 101
     assert report["inputs"]["observations"]["sha256"] == expected_observations
     assert report["inputs"]["observations"]["schema_version"] == 1
     assert report["inputs"]["checkpoint"]["sha256"] == expected_checkpoint
