@@ -3,13 +3,17 @@
 Only six reviewed architecture class definitions are compiled from the pinned
 upstream source.  In particular, the upstream module's dataset reads, training
 loop, logging, and other top-level side effects are never imported or executed.
-Held-out data enter this adapter only through the truth-free observation NPZ.
+Training accepts only the public train and validation artifacts.  A separately
+invoked inference phase reads one immutable checkpoint plus one truth-free
+observation NPZ, so the same seed checkpoint is reusable across every campaign.
 """
 
 from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
+import importlib.metadata
 import io
 import json
 import os
@@ -22,12 +26,15 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from pimsr_benchmarks import dataset2d_materialization as _materializer_contracts
 from pimsr_benchmarks import mtdlpy as _shared_contracts
+from pimsr_benchmarks import runner2d as _artifact_guards
 from pimsr_benchmarks.dataset2d_materialization import (
     OBSERVATION_CHANNEL_ORDER,
     OBSERVATION_SCHEMA,
@@ -37,12 +44,6 @@ from pimsr_benchmarks.mtdlpy import (
     HeldoutObservations,
     MTDLPyAdapterError,
     TrainingSplit,
-)
-from pimsr_benchmarks.mtdlpy import (
-    load_heldout_observations as _load_heldout_observations,
-)
-from pimsr_benchmarks.mtdlpy import (
-    load_training_split as _load_training_split,
 )
 from pimsr_benchmarks.runner2d import (
     file_artifact_provenance,
@@ -103,9 +104,9 @@ PREDICTION_KEYS = (
     "predicted_log10_resistivity",
 )
 RUNTIME_SCHEMA = "pimsr-mt2dinv-densenet-common-retrain-runtime"
-RUNTIME_SCHEMA_VERSION = 1
+RUNTIME_SCHEMA_VERSION = 2
 CHECKPOINT_SCHEMA = "pimsr-mt2dinv-densenet-common-retrain-checkpoint"
-CHECKPOINT_SCHEMA_VERSION = 1
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 class DenseNet2DAdapterError(RuntimeError):
@@ -117,9 +118,21 @@ class TrainingOutcome:
     """Small internal value object kept free of Torch-specific types."""
 
     state_dict: Mapping[str, Any]
-    predicted_log10_resistivity: np.ndarray
     training_summary: Mapping[str, object]
     runtime: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class _ArtifactSnapshot:
+    path: Path
+    payload: bytes
+    sha256: str
+    device: int
+    inode: int
+
+    @property
+    def size_bytes(self) -> int:
+        return len(self.payload)
 
 
 def _artifact_core(value: Mapping[str, object]) -> dict[str, object]:
@@ -244,19 +257,15 @@ def verify_pinned_repository(path: str | Path) -> dict[str, object]:
 
 
 def load_training_split(path: str | Path, *, role: str) -> TrainingSplit:
-    """Reuse the exact schema-v2 loader while presenting method-local errors."""
-    try:
-        return _load_training_split(path, role=role)
-    except MTDLPyAdapterError as exc:
-        raise DenseNet2DAdapterError(str(exc).replace("MTDLPy", METHOD_NAME)) from exc
+    """Load one schema-v2 split from bytes pinned by a single file descriptor."""
+    snapshot = _snapshot_regular_file(path, role=role)
+    return _load_training_split_snapshot(snapshot, role=role)
 
 
 def load_heldout_observations(path: str | Path) -> HeldoutObservations:
-    """Load the exact canonical truth-free observation NPZ v1."""
-    try:
-        return _load_heldout_observations(path)
-    except MTDLPyAdapterError as exc:
-        raise DenseNet2DAdapterError(str(exc).replace("MTDLPy", METHOD_NAME)) from exc
+    """Load the exact truth-free NPZ from one descriptor-pinned byte snapshot."""
+    snapshot = _snapshot_regular_file(path, role="truth-free observations")
+    return _load_heldout_observations_snapshot(snapshot)
 
 
 def _linear_interpolate_axis(
@@ -455,10 +464,9 @@ def _require_same_geometry(
             raise DenseNet2DAdapterError(f"{where} have different {name} axes")
 
 
-def _require_disjoint_samples(
+def _require_disjoint_training_splits(
     train: TrainingSplit,
     validation: TrainingSplit,
-    test: HeldoutObservations,
 ) -> None:
     if (
         train.generator_seed == validation.generator_seed
@@ -467,11 +475,8 @@ def _require_disjoint_samples(
         raise DenseNet2DAdapterError(
             "train and validation (generator_seed, sample_index) identities overlap"
         )
-    digests = [entry.provenance["sha256"] for entry in (train, validation, test)]
-    if len(set(digests)) != len(digests):
-        raise DenseNet2DAdapterError(
-            "train, validation, and held-out artifacts must differ"
-        )
+    if train.provenance["sha256"] == validation.provenance["sha256"]:
+        raise DenseNet2DAdapterError("train and validation artifacts must differ")
 
 
 def _configure_determinism(torch: Any, seed: int) -> None:
@@ -569,10 +574,9 @@ def _weighted_mse(torch: Any, predictions: Any, targets: Any) -> Any:
     return ((predictions - targets).square() * weights).mean()
 
 
-def _train_and_predict(
+def _train_model(
     train: TrainingSplit,
     validation: TrainingSplit,
-    test: HeldoutObservations,
     repository: Mapping[str, object],
     *,
     seed: int,
@@ -595,9 +599,6 @@ def _train_and_predict(
     )
     observations_validation = preprocess_observations(
         validation.observations, validation.frequencies, validation.station_x
-    )
-    observations_test = preprocess_observations(
-        test.observations, test.frequencies, test.station_x
     )
     targets_train = resize_log10_resistivity(train.targets, NETWORK_OUTPUT_SHAPE)
     targets_validation = resize_log10_resistivity(
@@ -728,13 +729,79 @@ def _train_and_predict(
     model.load_state_dict(best_state, strict=True)
     model.eval()
 
+    peak_cuda_memory = (
+        int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+    )
+    cuda_device = torch.cuda.get_device_name(device) if device.type == "cuda" else None
+    return TrainingOutcome(
+        state_dict=best_state,
+        training_summary={
+            "best_epoch": best_epoch,
+            "best_validation_weighted_mse": best_loss,
+            "history": history,
+        },
+        runtime={
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "numpy": np.__version__,
+            "torch": str(torch.__version__),
+            "torch_cuda_build": torch.version.cuda,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "device": str(device),
+            "cuda_device_name": cuda_device,
+            "peak_cuda_memory_bytes": peak_cuda_memory,
+            "preprocessing_wall_time_s": preprocessing_wall_time_s,
+            "model_initialization_wall_time_s": initialization_wall_time_s,
+            "training_wall_time_s": training_wall_time_s,
+            "backend_wall_time_s": time.perf_counter() - backend_start,
+        },
+    )
+
+
+def _predict_from_checkpoint(
+    test: HeldoutObservations,
+    repository: Mapping[str, object],
+    model_state: Mapping[str, Any],
+    *,
+    seed: int,
+    device_name: str,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Run inference without accepting a training target or campaign truth."""
+    backend_start = time.perf_counter()
+    import torch
+
+    _configure_determinism(torch, seed)
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise DenseNet2DAdapterError("CUDA was requested but is unavailable")
+    device = torch.device(device_name)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    preprocessing_start = time.perf_counter()
+    observations = preprocess_observations(
+        test.observations, test.frequencies, test.station_x
+    )
+    preprocessing_wall_time_s = time.perf_counter() - preprocessing_start
+
+    initialization_start = time.perf_counter()
+    model = _load_upstream_model(repository, torch=torch)
+    try:
+        model.load_state_dict(dict(model_state), strict=True)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise DenseNet2DAdapterError(
+            "checkpoint model_state is incompatible with the pinned architecture"
+        ) from exc
+    model.to(device)
+    model.eval()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    initialization_wall_time_s = time.perf_counter() - initialization_start
+
     inference_start = time.perf_counter()
     native_batches: list[np.ndarray] = []
-    with torch.no_grad():
-        for start in range(0, observations_test.shape[0], BATCH_SIZE):
-            batch = torch.from_numpy(observations_test[start : start + BATCH_SIZE]).to(
-                device
-            )
+    with torch.inference_mode():
+        for start in range(0, observations.shape[0], BATCH_SIZE):
+            batch = torch.from_numpy(observations[start : start + BATCH_SIZE]).to(device)
             raw_predictions = model(batch)
             expected = (batch.shape[0], MODEL_OUTPUT_FEATURES)
             if tuple(raw_predictions.shape) != expected or not bool(
@@ -754,36 +821,26 @@ def _train_and_predict(
     predictions = resize_log10_resistivity(
         np.concatenate(native_batches, axis=0), OUTPUT_GRID_SHAPE
     )
-
     peak_cuda_memory = (
         int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
     )
     cuda_device = torch.cuda.get_device_name(device) if device.type == "cuda" else None
-    return TrainingOutcome(
-        state_dict=best_state,
-        predicted_log10_resistivity=predictions,
-        training_summary={
-            "best_epoch": best_epoch,
-            "best_validation_weighted_mse": best_loss,
-            "history": history,
-        },
-        runtime={
-            "python": platform.python_version(),
-            "platform": platform.platform(),
-            "numpy": np.__version__,
-            "torch": str(torch.__version__),
-            "torch_cuda_build": torch.version.cuda,
-            "cuda_available": bool(torch.cuda.is_available()),
-            "device": str(device),
-            "cuda_device_name": cuda_device,
-            "peak_cuda_memory_bytes": peak_cuda_memory,
-            "preprocessing_wall_time_s": preprocessing_wall_time_s,
-            "model_initialization_wall_time_s": initialization_wall_time_s,
-            "training_wall_time_s": training_wall_time_s,
-            "inference_wall_time_s": inference_wall_time_s,
-            "backend_wall_time_s": time.perf_counter() - backend_start,
-        },
-    )
+    runtime = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "numpy": np.__version__,
+        "torch": str(torch.__version__),
+        "torch_cuda_build": torch.version.cuda,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "device": str(device),
+        "cuda_device_name": cuda_device,
+        "peak_cuda_memory_bytes": peak_cuda_memory,
+        "preprocessing_wall_time_s": preprocessing_wall_time_s,
+        "model_initialization_wall_time_s": initialization_wall_time_s,
+        "inference_wall_time_s": inference_wall_time_s,
+        "backend_wall_time_s": time.perf_counter() - backend_start,
+    }
+    return predictions, runtime
 
 
 def _canonical_npy_bytes(array: np.ndarray) -> bytes:
@@ -852,17 +909,46 @@ def _canonical_json_bytes(value: object) -> bytes:
         ) from exc
 
 
-def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
+def _require_snapshot_matches(
+    actual: _ArtifactSnapshot,
+    expected: _ArtifactSnapshot,
+    *,
+    role: str,
+) -> None:
+    if (
+        actual.sha256 != expected.sha256
+        or actual.size_bytes != expected.size_bytes
+        or actual.device != expected.device
+        or actual.inode != expected.inode
+    ):
+        raise DenseNet2DAdapterError(f"{role} changed after validation")
+
+
+def _publish_parts(
+    parts: Sequence[Path],
+    destinations: Sequence[Path],
+    *,
+    expected_snapshots: Sequence[_ArtifactSnapshot] | None = None,
+) -> None:
     """Publish with no overwrite and identity-aware rollback on BaseException."""
+    if expected_snapshots is None:
+        snapshots = tuple(
+            _snapshot_regular_file(part, role=f"staged artifact {part}") for part in parts
+        )
+    else:
+        snapshots = tuple(expected_snapshots)
+    if len(parts) != len(destinations) or len(parts) != len(snapshots):
+        raise ValueError("publication parts, destinations, and snapshots must align")
     published: list[tuple[Path, tuple[int, int]]] = []
     try:
-        for part, destination in zip(parts, destinations, strict=True):
-            part_info = part.stat(follow_symlinks=False)
-            if part.is_symlink() or not stat.S_ISREG(part_info.st_mode):
-                raise DenseNet2DAdapterError(
-                    f"staged artifact must be a regular file: {part}"
-                )
-            expected_identity = (int(part_info.st_dev), int(part_info.st_ino))
+        for part, destination, expected in zip(
+            parts, destinations, snapshots, strict=True
+        ):
+            current_part = _snapshot_regular_file(part, role=f"staged artifact {part}")
+            _require_snapshot_matches(
+                current_part, expected, role=f"staged artifact {part}"
+            )
+            expected_identity = (expected.device, expected.inode)
             try:
                 os.link(part, destination)
             except FileExistsError as exc:
@@ -873,7 +959,7 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
                 if os.path.lexists(destination):
                     current = destination.stat(follow_symlinks=False)
                     if (
-                        not destination.is_symlink()
+                        not _path_is_link(destination)
                         and stat.S_ISREG(current.st_mode)
                         and (int(current.st_dev), int(current.st_ino))
                         == expected_identity
@@ -881,15 +967,23 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
                         destination.unlink()
                 raise
             published.append((destination, expected_identity))
-            current = destination.stat(follow_symlinks=False)
-            if (
-                destination.is_symlink()
-                or not stat.S_ISREG(current.st_mode)
-                or (int(current.st_dev), int(current.st_ino)) != expected_identity
-            ):
-                raise DenseNet2DAdapterError(
-                    f"published artifact identity mismatch: {destination}"
-                )
+            published_snapshot = _snapshot_regular_file(
+                destination, role=f"published artifact {destination}"
+            )
+            _require_snapshot_matches(
+                published_snapshot,
+                expected,
+                role=f"published artifact {destination}",
+            )
+        for destination, expected in zip(destinations, snapshots, strict=True):
+            final_snapshot = _snapshot_regular_file(
+                destination, role=f"published artifact {destination}"
+            )
+            _require_snapshot_matches(
+                final_snapshot,
+                expected,
+                role=f"published artifact {destination}",
+            )
     except BaseException as exc:
         unsafe: list[str] = []
         for destination, expected_identity in reversed(published):
@@ -897,7 +991,7 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
                 continue
             current = destination.stat(follow_symlinks=False)
             if (
-                destination.is_symlink()
+                _path_is_link(destination)
                 or not stat.S_ISREG(current.st_mode)
                 or (int(current.st_dev), int(current.st_ino)) != expected_identity
             ):
@@ -912,34 +1006,6 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
         raise
 
 
-def _output_paths(
-    checkpoint: str | Path,
-    predictions: str | Path,
-    runtime: str | Path,
-) -> tuple[tuple[Path, Path, Path], tuple[Path, Path, Path]]:
-    paths = tuple(Path(path).resolve() for path in (checkpoint, predictions, runtime))
-    if len(set(paths)) != 3:
-        raise ValueError("checkpoint, prediction, and runtime outputs must be distinct")
-    for path, suffix in zip(paths, (".pt", ".npz", ".json"), strict=True):
-        if path.suffix.lower() != suffix:
-            raise ValueError(f"MT2DInv-DenseNet output {path} must use {suffix}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-    existing = [path for path in paths if path.exists() or path.is_symlink()]
-    if existing:
-        raise FileExistsError(
-            "refusing to overwrite existing MT2DInv-DenseNet output(s): "
-            + ", ".join(str(path) for path in existing)
-        )
-    parts = tuple(path.with_name(path.name + ".part") for path in paths)
-    stale = [path for path in parts if path.exists() or path.is_symlink()]
-    if stale:
-        raise FileExistsError(
-            "stale MT2DInv-DenseNet partial output(s) require inspection: "
-            + ", ".join(str(path) for path in stale)
-        )
-    return paths, parts
-
-
 def _checkpoint_bytes(value: Mapping[str, object]) -> bytes:
     import torch
 
@@ -948,87 +1014,431 @@ def _checkpoint_bytes(value: Mapping[str, object]) -> bytes:
     return payload.getvalue()
 
 
-def run_common_retrain(
-    *,
-    repository_path: str | Path,
-    train_h5: str | Path,
-    validation_h5: str | Path,
-    observations_npz: str | Path,
-    seed: int,
-    device: str,
-    checkpoint_out: str | Path,
-    predictions_out: str | Path,
-    runtime_out: str | Path,
-    command: Sequence[str] | None = None,
-    runner_source: str | Path | None = None,
-) -> dict[str, object]:
-    """Run one fixed common-retraining seed and immutably publish artifacts."""
-    if isinstance(seed, bool) or seed not in COMMON_RETRAIN_SEEDS:
-        raise ValueError(f"seed must be one of {COMMON_RETRAIN_SEEDS}")
-    if device not in {"cpu", "cuda"}:
-        raise ValueError("device must be 'cpu' or 'cuda'")
-    destinations, parts = _output_paths(checkpoint_out, predictions_out, runtime_out)
-    checkpoint_path, prediction_path, _runtime_path = destinations
-    checkpoint_part, prediction_part, runtime_part = parts
-
-    started_at = datetime.now(UTC)
-    wall_start = time.perf_counter()
-    adapter_source = file_artifact_provenance(__file__)
-    shared_contract_loader_source = file_artifact_provenance(_shared_contracts.__file__)
-    runner_identity = (
-        file_artifact_provenance(runner_source) if runner_source is not None else None
+def run_common_retrain(*_args: object, **_kwargs: object) -> dict[str, object]:
+    """Reject the retired campaign-specific train-and-infer API."""
+    raise DenseNet2DAdapterError(
+        "combined training and campaign inference was removed; use "
+        "train_common_retrain followed by run_common_inference"
     )
-    repository = verify_pinned_repository(repository_path)
-    train = load_training_split(train_h5, role="MT2DInv-DenseNet training dataset")
-    validation = load_training_split(
-        validation_h5, role="MT2DInv-DenseNet validation dataset"
-    )
-    test = load_heldout_observations(observations_npz)
-    _require_same_geometry(train, validation, where="train and validation datasets")
-    _require_same_geometry(train, test, where="train and held-out observations")
-    _require_disjoint_samples(train, validation, test)
 
-    architecture_source = repository.get("architecture_source")
-    if not isinstance(architecture_source, Mapping):
-        raise DenseNet2DAdapterError("repository architecture provenance is missing")
-    source_artifacts: dict[str, Mapping[str, object]] = {
-        "train_dataset": train.provenance,
-        "validation_dataset": validation.provenance,
-        "heldout_observations": test.provenance,
-        "architecture_source": architecture_source,
-        "adapter_source": adapter_source,
-        "shared_contract_loader_source": shared_contract_loader_source,
+
+_CHECKPOINT_KEYS = frozenset(
+    {
+        "checkpoint_schema",
+        "checkpoint_schema_version",
+        "method_id",
+        "method",
+        "track",
+        "seed",
+        "model",
+        "model_state",
+        "training_config",
+        "preprocessing",
+        "training_summary",
+        "training_runtime",
+        "source",
+        "dependency_closure",
+        "dataset_identities",
+        "data_geometry",
+        "campaign_observations_accepted_for_training",
+        "truth_keys_accepted",
+        "contains_truth",
+        "contains_observation_campaign",
     }
-    if runner_identity is not None:
-        source_artifacts["runner_source"] = runner_identity
+)
+_MODEL_KEYS = frozenset(
+    {"class", "blocks", "growth_rate", "output_features", "parameter_count"}
+)
+_DATASET_IDENTITY_KEYS = frozenset(
+    {"path", "sha256", "size_bytes", "sample_count", "sample_index_sha256"}
+)
+_GEOMETRY_KEYS = frozenset(
+    {"frequency_hz", "station_x_m", "x_cell_centers_m", "depth_cell_centers_m"}
+)
+_DEPENDENCY_CLOSURE_SCHEMA = "pimsr-mt2dinv-densenet-source-dependency-closure"
+_DEPENDENCY_CLOSURE_VERSION = 2
+_COMMON_BACKEND_RUNTIME_KEYS = frozenset(
+    {
+        "python",
+        "platform",
+        "numpy",
+        "torch",
+        "torch_cuda_build",
+        "cuda_available",
+        "device",
+        "cuda_device_name",
+        "peak_cuda_memory_bytes",
+        "preprocessing_wall_time_s",
+        "model_initialization_wall_time_s",
+        "backend_wall_time_s",
+    }
+)
+_TRAINING_RUNTIME_KEYS = _COMMON_BACKEND_RUNTIME_KEYS | {"training_wall_time_s"}
+_INFERENCE_RUNTIME_KEYS = _COMMON_BACKEND_RUNTIME_KEYS | {"inference_wall_time_s"}
 
-    outcome = _train_and_predict(
-        train,
-        validation,
-        test,
-        repository,
-        seed=seed,
-        device_name=device,
-    )
-    predictions = np.asarray(outcome.predicted_log10_resistivity, dtype="<f4")
-    expected_prediction_shape = (test.sample_index.size, *OUTPUT_GRID_SHAPE)
+
+def _require_exact_keys(
+    value: Mapping[str, Any], expected: frozenset[str], role: str
+) -> None:
+    actual = set(value)
+    if actual != set(expected):
+        raise DenseNet2DAdapterError(
+            f"{role} keys mismatch; missing={sorted(set(expected) - actual)}, "
+            f"extra={sorted(actual - set(expected))}"
+        )
+
+
+def _require_sha256(value: object, role: str) -> str:
     if (
-        predictions.shape != expected_prediction_shape
-        or not np.isfinite(predictions).all()
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise DenseNet2DAdapterError(
-            f"backend predictions must be finite with shape {expected_prediction_shape}"
+            f"{role} must be 64 lowercase hexadecimal characters"
         )
+    return value
 
-    for role, artifact in source_artifacts.items():
-        require_file_artifact_unchanged(_artifact_core(artifact), role=role)
-    if verify_pinned_repository(repository_path) != repository:
+
+_SAFE_FALSE_PRESCORE_DECLARATIONS = frozenset(
+    {
+        "contains_truth",
+        "heldout_truth_available_to_adapter",
+        "truth_keys_accepted",
+    }
+)
+
+
+def _metadata_key_is_forbidden(key: str, value: object) -> bool:
+    normalized = key.lower().replace("-", "_")
+    if normalized in _SAFE_FALSE_PRESCORE_DECLARATIONS and value is False:
+        return False
+    if normalized in {"generator_seed", "generator_seeds"}:
+        return True
+    tokens = normalized.split("_")
+    if any(
+        token in {"hidden", "operator", "secret", "truth", "withheld"} for token in tokens
+    ):
+        return True
+    return any(
+        left == "sample" and right in {"id", "ids"} for left, right in pairwise(tokens)
+    )
+
+
+def _require_no_prescore_metadata(value: object, *, role: str) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise DenseNet2DAdapterError(f"{role} contains a non-string metadata key")
+            if _metadata_key_is_forbidden(key, child):
+                raise DenseNet2DAdapterError(
+                    f"{role} exposes forbidden pre-score metadata key {key!r}"
+                )
+            _require_no_prescore_metadata(child, role=role)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for child in value:
+            _require_no_prescore_metadata(child, role=role)
+
+
+def _path_is_link(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction()) if callable(is_junction) else False
+
+
+def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
+
+
+def _snapshot_regular_file(
+    path: str | Path,
+    *,
+    role: str,
+    expected_sha256: str | None = None,
+) -> _ArtifactSnapshot:
+    requested = Path(os.path.abspath(os.fspath(path)))
+    expected = (
+        None
+        if expected_sha256 is None
+        else _require_sha256(expected_sha256, f"expected {role} SHA-256")
+    )
+    try:
+        path_before = requested.lstat()
+    except OSError as exc:
+        raise DenseNet2DAdapterError(f"cannot stat {role}: {requested}") from exc
+    if _path_is_link(requested):
+        raise DenseNet2DAdapterError(f"{role} must not be a symbolic link or junction")
+    if not stat.S_ISREG(path_before.st_mode):
+        raise DenseNet2DAdapterError(f"{role} must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(requested, flags)
+    except OSError as exc:
         raise DenseNet2DAdapterError(
-            "pinned MT2DInv-DenseNet repository changed during the run"
-        )
+            f"cannot open {role} without following links"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise DenseNet2DAdapterError(f"{role} must be a regular file")
+        if _stat_identity(path_before) != _stat_identity(opened):
+            raise DenseNet2DAdapterError(f"{role} changed before it was opened")
+        try:
+            resolved = requested.resolve(strict=True)
+            resolved_info = resolved.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise DenseNet2DAdapterError(f"cannot resolve opened {role}") from exc
+        if _path_is_link(resolved) or _stat_identity(resolved_info) != _stat_identity(
+            opened
+        ):
+            raise DenseNet2DAdapterError(f"{role} path does not identify the opened file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 8 * 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+        after_descriptor = os.fstat(descriptor)
+        try:
+            path_after = requested.lstat()
+        except OSError as exc:
+            raise DenseNet2DAdapterError(
+                f"{role} path disappeared while it was read"
+            ) from exc
+        if (
+            _path_is_link(requested)
+            or _stat_identity(opened) != _stat_identity(after_descriptor)
+            or _stat_identity(opened) != _stat_identity(path_after)
+            or len(payload) != int(opened.st_size)
+        ):
+            raise DenseNet2DAdapterError(f"{role} changed while it was read")
+    finally:
+        os.close(descriptor)
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected is not None and digest != expected:
+        raise DenseNet2DAdapterError(f"{role} SHA-256 differs from the pinned digest")
+    return _ArtifactSnapshot(
+        path=resolved,
+        payload=payload,
+        sha256=digest,
+        device=int(opened.st_dev),
+        inode=int(opened.st_ino),
+    )
 
-    training_config = {
-        "campaign_seeds": list(COMMON_RETRAIN_SEEDS),
+
+def _load_training_split_snapshot(
+    snapshot: _ArtifactSnapshot,
+    *,
+    role: str,
+) -> TrainingSplit:
+    import h5py
+    from pimsr_inversion.contracts2d import validate_dataset2d
+
+    try:
+        with h5py.File(io.BytesIO(snapshot.payload), "r") as h5:
+            contract = validate_dataset2d(h5)
+            generator_seed = int(np.asarray(h5.attrs["generator_seed"]).item())
+            observations = np.stack(
+                [
+                    h5["obs_mt_log10_rho"][:],
+                    h5["obs_mt_phase"][:],
+                    h5["obs_mt_log10_rho_tm"][:],
+                    h5["obs_mt_phase_tm"][:],
+                ],
+                axis=1,
+            ).astype(np.float32, copy=False)
+            targets = np.asarray(h5["target_log10_res"][:], dtype=np.float32)
+            sample_index = np.asarray(h5["sample_index"][:], dtype=np.int64)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise DenseNet2DAdapterError(
+            f"cannot load {role} from pinned bytes: {exc}"
+        ) from exc
+
+    frequencies = np.asarray(contract.frequencies, dtype="<f8")
+    station_x = np.asarray(contract.station_x, dtype="<f8")
+    x_grid = np.asarray(contract.x_grid, dtype="<f8")
+    depth_grid = np.asarray(contract.depth_grid, dtype="<f8")
+    try:
+        _shared_contracts._require_geometry_shape(
+            frequencies,
+            station_x,
+            x_grid,
+            depth_grid,
+            where=role,
+        )
+    except MTDLPyAdapterError as exc:
+        raise DenseNet2DAdapterError(str(exc).replace("MTDLPy", METHOD_NAME)) from exc
+    if observations.shape != (sample_index.size, 4, *INPUT_GRID_SHAPE):
+        raise DenseNet2DAdapterError(f"{role} has an unexpected observation tensor shape")
+    if targets.shape != (sample_index.size, *OUTPUT_GRID_SHAPE):
+        raise DenseNet2DAdapterError(f"{role} has an unexpected target tensor shape")
+    if not np.isfinite(observations).all() or not np.isfinite(targets).all():
+        raise DenseNet2DAdapterError(f"{role} arrays must be finite")
+    return TrainingSplit(
+        observations=observations,
+        targets=targets,
+        sample_index=sample_index,
+        generator_seed=generator_seed,
+        frequencies=frequencies,
+        station_x=station_x,
+        x_grid=x_grid,
+        depth_grid=depth_grid,
+        provenance=_snapshot_core(snapshot),
+    )
+
+
+def _load_heldout_observations_snapshot(
+    snapshot: _ArtifactSnapshot,
+) -> HeldoutObservations:
+    expected_keys = tuple(_shared_contracts._OBSERVATION_KEYS)
+    try:
+        with zipfile.ZipFile(io.BytesIO(snapshot.payload), "r") as archive:
+            names = archive.namelist()
+        expected_names = [f"{name}.npy" for name in expected_keys]
+        if names != expected_names or len(names) != len(set(names)):
+            raise DenseNet2DAdapterError(
+                "observation NPZ members must exactly match the ordered truth-free contract"
+            )
+        with np.load(io.BytesIO(snapshot.payload), allow_pickle=False) as payload:
+            if tuple(payload.files) != expected_keys:
+                raise DenseNet2DAdapterError(
+                    "observation NPZ keys are not in the canonical contract order"
+                )
+            arrays = {name: np.asarray(payload[name]).copy() for name in payload.files}
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise DenseNet2DAdapterError(
+            f"cannot load truth-free observations from pinned bytes: {exc}"
+        ) from exc
+
+    try:
+        schema = _shared_contracts._scalar_string(arrays["schema"], "schema")
+        if schema != OBSERVATION_SCHEMA:
+            raise DenseNet2DAdapterError("unsupported held-out observation schema")
+        schema_version = arrays["schema_version"]
+        if (
+            schema_version.shape != ()
+            or schema_version.dtype != np.dtype("<i8")
+            or int(schema_version) != PAYLOAD_SCHEMA_VERSION
+        ):
+            raise DenseNet2DAdapterError(
+                "unsupported held-out observation schema version"
+            )
+        order = arrays["observation_channel_order"]
+        if (
+            order.dtype.kind != "U"
+            or order.shape != (4,)
+            or tuple(order.tolist()) != OBSERVATION_CHANNEL_ORDER
+        ):
+            raise DenseNet2DAdapterError(
+                "held-out observation channel order is not canonical"
+            )
+        sample_index = arrays["sample_index"]
+        if (
+            sample_index.dtype != np.dtype("<i8")
+            or sample_index.ndim != 1
+            or sample_index.size == 0
+            or np.any(sample_index < 0)
+            or np.unique(sample_index).size != sample_index.size
+        ):
+            raise DenseNet2DAdapterError(
+                "held-out sample_index must contain unique non-negative opaque IDs"
+            )
+        frequencies = _shared_contracts._axis(
+            arrays["frequency_hz"], name="frequency_hz", positive=True
+        )
+        station_x = _shared_contracts._axis(arrays["station_x_m"], name="station_x_m")
+        x_grid = _shared_contracts._axis(
+            arrays["x_cell_centers_m"], name="x_cell_centers_m"
+        )
+        depth_grid = _shared_contracts._axis(
+            arrays["depth_cell_centers_m"],
+            name="depth_cell_centers_m",
+            positive=True,
+        )
+        _shared_contracts._require_geometry_shape(
+            frequencies,
+            station_x,
+            x_grid,
+            depth_grid,
+            where="held-out observations",
+        )
+    except (KeyError, MTDLPyAdapterError) as exc:
+        raise DenseNet2DAdapterError(str(exc).replace("MTDLPy", METHOD_NAME)) from exc
+
+    shape = (sample_index.size, *INPUT_GRID_SHAPE)
+    values: list[np.ndarray] = []
+    floors: list[np.ndarray] = []
+    for name in _shared_contracts._OBSERVATION_VALUE_KEYS:
+        array = arrays[name]
+        if array.dtype != np.dtype("<f4") or array.shape != shape:
+            raise DenseNet2DAdapterError(f"{name} must be float32 with shape {shape}")
+        if not np.isfinite(array).all():
+            raise DenseNet2DAdapterError(f"{name} must be finite")
+        if "phase" in name and np.any((array < 0.0) | (array >= 180.0)):
+            raise DenseNet2DAdapterError(f"{name} violates the [0, 180) convention")
+        values.append(array)
+    for name in _shared_contracts._OBSERVATION_FLOOR_KEYS:
+        array = arrays[name]
+        if array.dtype != np.dtype("<f4") or array.shape != shape:
+            raise DenseNet2DAdapterError(f"{name} must be float32 with shape {shape}")
+        if not np.isfinite(array).all() or np.any(array <= 0):
+            raise DenseNet2DAdapterError(f"{name} must be finite and strictly positive")
+        floors.append(array)
+    mask = arrays["valid_mask"]
+    expected_mask_shape = (sample_index.size, 4, *INPUT_GRID_SHAPE)
+    if mask.dtype != np.dtype(bool) or mask.shape != expected_mask_shape:
+        raise DenseNet2DAdapterError(
+            f"valid_mask must be bool with shape {expected_mask_shape}"
+        )
+    if not bool(mask.all()):
+        raise DenseNet2DAdapterError(
+            f"{METHOD_NAME} common retraining requires valid_mask to be all true"
+        )
+    return HeldoutObservations(
+        observations=np.stack(values, axis=1),
+        evaluation_floors=np.stack(floors, axis=1),
+        sample_index=sample_index,
+        frequencies=frequencies,
+        station_x=station_x,
+        x_grid=x_grid,
+        depth_grid=depth_grid,
+        provenance=_snapshot_core(snapshot),
+    )
+
+
+def _snapshot_core(snapshot: _ArtifactSnapshot) -> dict[str, object]:
+    return {
+        "path": str(snapshot.path),
+        "sha256": snapshot.sha256,
+        "size_bytes": snapshot.size_bytes,
+    }
+
+
+def _json_sha256(value: object) -> str:
+    try:
+        payload = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise DenseNet2DAdapterError(
+            f"dependency closure is not canonical JSON: {exc}"
+        ) from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _training_config(seed: int) -> dict[str, object]:
+    return {
         "seed": seed,
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
@@ -1067,7 +1477,10 @@ def run_common_retrain(
         "equal_compute_claim": False,
         "upstream_cli_unchanged_claim": False,
     }
-    preprocessing = {
+
+
+def _preprocessing_contract() -> dict[str, object]:
+    return {
         "input_channel_order_before_native_reorder": list(OBSERVATION_CHANNEL_ORDER),
         "benchmark_observation_axis_order": [
             "sample",
@@ -1130,116 +1543,906 @@ def run_common_retrain(
         "evaluation_floors_used_as_model_input": False,
         "upstream_cli_unchanged_claim": False,
     }
-    dataset_identities = {
-        "train": {
-            **dict(train.provenance),
-            "generator_seed": train.generator_seed,
-            "sample_identity": "(generator_seed,sample_index)",
-        },
-        "validation": {
-            **dict(validation.provenance),
-            "generator_seed": validation.generator_seed,
-            "sample_identity": "(generator_seed,sample_index)",
-        },
-        "heldout_observations": dict(test.provenance),
+
+
+def _model_contract() -> dict[str, object]:
+    return {
+        "class": "DenseNetWithICBAM",
+        "blocks": list(MODEL_BLOCKS),
+        "growth_rate": MODEL_GROWTH_RATE,
+        "output_features": MODEL_OUTPUT_FEATURES,
+        "parameter_count": MODEL_PARAMETER_COUNT,
     }
-    checkpoint = {
+
+
+def _dataset_identity(split: TrainingSplit) -> dict[str, object]:
+    provenance = _artifact_core(split.provenance)
+    return {
+        **provenance,
+        "sample_count": int(split.sample_index.size),
+        "sample_index_sha256": hashlib.sha256(
+            np.asarray(split.sample_index, dtype="<i8").tobytes()
+        ).hexdigest(),
+    }
+
+
+def _data_geometry(split: TrainingSplit) -> dict[str, object]:
+    return {
+        "frequency_hz": np.asarray(split.frequencies, dtype="<f8").tolist(),
+        "station_x_m": np.asarray(split.station_x, dtype="<f8").tolist(),
+        "x_cell_centers_m": np.asarray(split.x_grid, dtype="<f8").tolist(),
+        "depth_cell_centers_m": np.asarray(split.depth_grid, dtype="<f8").tolist(),
+    }
+
+
+def _dependency_closure(
+    artifacts: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    required_sources = {
+        "adapter_source",
+        "artifact_guard_source",
+        "architecture_source",
+        "inversion_dataset_contract_source",
+        "materializer_contract_source",
+        "shared_contract_loader_source",
+    }
+    actual_sources = set(artifacts)
+    if actual_sources not in (required_sources, required_sources | {"runner_source"}):
+        raise DenseNet2DAdapterError(
+            "dependency source artifact set is not the exact required local set"
+        )
+    exact_artifacts = {
+        name: _artifact_core(artifacts[name]) for name in sorted(artifacts)
+    }
+    packages: dict[str, str] = {}
+    for distribution in ("h5py", "numpy", "torch", "pimsr-inversion"):
+        try:
+            packages[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise DenseNet2DAdapterError(
+                f"required dependency distribution is missing: {distribution}"
+            ) from exc
+    cli_entrypoint_source_included = "runner_source" in exact_artifacts
+    if cli_entrypoint_source_included:
+        expected_runner = _validated_runner_source_artifact(
+            _benchmark_runner_source_path()
+        )
+        if exact_artifacts["runner_source"] != expected_runner:
+            raise DenseNet2DAdapterError(
+                "dependency closure runner source is not the exact benchmark CLI"
+            )
+    body: dict[str, object] = {
+        "schema": _DEPENDENCY_CLOSURE_SCHEMA,
+        "schema_version": _DEPENDENCY_CLOSURE_VERSION,
+        "evidence_scope": (
+            "direct_python_source_artifacts_and_distribution_version_strings"
+        ),
+        "python": platform.python_version(),
+        "packages": packages,
+        "local_source_artifacts": exact_artifacts,
+        "cli_entrypoint_source_included": cli_entrypoint_source_included,
+        "required_local_python_source_artifacts_recorded": (
+            cli_entrypoint_source_included
+        ),
+        "native_binary_environment_complete": False,
+    }
+    return {**body, "closure_sha256": _json_sha256(body)}
+
+
+def _module_source_artifact(module_name: str) -> dict[str, object]:
+    module = importlib.import_module(module_name)
+    source = getattr(module, "__file__", None)
+    if not isinstance(source, str):
+        raise DenseNet2DAdapterError(
+            f"cannot identify source for dependency {module_name}"
+        )
+    path = Path(source)
+    if path.suffix == ".pyc":
+        path = path.with_suffix(".py")
+    return _snapshot_core(
+        _snapshot_regular_file(path, role=f"dependency source {module_name}")
+    )
+
+
+def _benchmark_runner_source_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "scripts" / "run_densenet2d_common.py"
+
+
+def _validated_runner_source_artifact(path: str | Path) -> dict[str, object]:
+    snapshot = _snapshot_regular_file(path, role="DenseNet CLI runner source")
+    try:
+        expected = _benchmark_runner_source_path().resolve(strict=True)
+    except OSError as exc:
+        raise DenseNet2DAdapterError(
+            "cannot identify benchmark scripts/run_densenet2d_common.py"
+        ) from exc
+    if snapshot.path != expected:
+        raise DenseNet2DAdapterError(
+            "runner_source must be the exact benchmark scripts/run_densenet2d_common.py"
+        )
+    expected_info = expected.stat(follow_symlinks=False)
+    if (snapshot.device, snapshot.inode) != (
+        int(expected_info.st_dev),
+        int(expected_info.st_ino),
+    ):
+        raise DenseNet2DAdapterError(
+            "runner_source identity changed during dependency closure capture"
+        )
+    return _snapshot_core(snapshot)
+
+
+def _source_dependency_artifacts(
+    repository: Mapping[str, object],
+    *,
+    runner_source: str | Path | None = None,
+) -> dict[str, Mapping[str, object]]:
+    architecture = repository.get("architecture_source")
+    if not isinstance(architecture, Mapping):
+        raise DenseNet2DAdapterError("repository architecture provenance is missing")
+    result: dict[str, Mapping[str, object]] = {
+        "adapter_source": _snapshot_core(
+            _snapshot_regular_file(__file__, role="DenseNet adapter source")
+        ),
+        "artifact_guard_source": _snapshot_core(
+            _snapshot_regular_file(
+                _artifact_guards.__file__, role="artifact guard source"
+            )
+        ),
+        "architecture_source": architecture,
+        "inversion_dataset_contract_source": _module_source_artifact(
+            "pimsr_inversion.contracts2d"
+        ),
+        "materializer_contract_source": _snapshot_core(
+            _snapshot_regular_file(
+                _materializer_contracts.__file__, role="materializer contract source"
+            )
+        ),
+        "shared_contract_loader_source": _snapshot_core(
+            _snapshot_regular_file(
+                _shared_contracts.__file__, role="shared contract loader source"
+            )
+        ),
+    }
+    if runner_source is not None:
+        result["runner_source"] = _validated_runner_source_artifact(runner_source)
+    return result
+
+
+def _validate_dataset_identity(value: object, role: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise DenseNet2DAdapterError(f"{role} must be a mapping")
+    _require_exact_keys(value, _DATASET_IDENTITY_KEYS, role)
+    if not isinstance(value["path"], str) or not value["path"]:
+        raise DenseNet2DAdapterError(f"{role}.path must be non-empty")
+    _require_sha256(value["sha256"], f"{role}.sha256")
+    _require_sha256(value["sample_index_sha256"], f"{role}.sample_index_sha256")
+    for name in ("size_bytes", "sample_count"):
+        item = value[name]
+        if isinstance(item, bool) or not isinstance(item, int) or item < 1:
+            raise DenseNet2DAdapterError(f"{role}.{name} must be a positive integer")
+    return value
+
+
+def _validate_data_geometry(value: object) -> dict[str, np.ndarray]:
+    if not isinstance(value, Mapping):
+        raise DenseNet2DAdapterError("checkpoint.data_geometry must be a mapping")
+    _require_exact_keys(value, _GEOMETRY_KEYS, "checkpoint.data_geometry")
+    expected_shapes = {
+        "frequency_hz": (INPUT_GRID_SHAPE[0],),
+        "station_x_m": (INPUT_GRID_SHAPE[1],),
+        "x_cell_centers_m": (OUTPUT_GRID_SHAPE[1],),
+        "depth_cell_centers_m": (OUTPUT_GRID_SHAPE[0],),
+    }
+    result: dict[str, np.ndarray] = {}
+    for name, shape in expected_shapes.items():
+        if not isinstance(value[name], list):
+            raise DenseNet2DAdapterError(
+                f"checkpoint.data_geometry.{name} must be a JSON list"
+            )
+        axis = np.asarray(value[name], dtype=np.float64)
+        if axis.shape != shape or not np.isfinite(axis).all():
+            raise DenseNet2DAdapterError(
+                f"checkpoint.data_geometry.{name} has invalid shape or values"
+            )
+        if np.any(np.diff(axis) <= 0):
+            raise DenseNet2DAdapterError(
+                f"checkpoint.data_geometry.{name} must be strictly increasing"
+            )
+        if name in {"frequency_hz", "depth_cell_centers_m"} and np.any(axis <= 0):
+            raise DenseNet2DAdapterError(
+                f"checkpoint.data_geometry.{name} must be positive"
+            )
+        result[name] = axis
+    return result
+
+
+def _validate_training_summary(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise DenseNet2DAdapterError("checkpoint.training_summary must be a mapping")
+    expected = frozenset({"best_epoch", "best_validation_weighted_mse", "history"})
+    _require_exact_keys(value, expected, "checkpoint.training_summary")
+    history = value["history"]
+    if not isinstance(history, list) or len(history) != EPOCHS:
+        raise DenseNet2DAdapterError(
+            "checkpoint training history must contain every configured epoch"
+        )
+    best_epoch = value["best_epoch"]
+    if isinstance(best_epoch, bool) or not isinstance(best_epoch, int):
+        raise DenseNet2DAdapterError("checkpoint best_epoch must be an integer")
+    validation_losses: list[float] = []
+    for index, record in enumerate(history, start=1):
+        if not isinstance(record, Mapping):
+            raise DenseNet2DAdapterError("checkpoint history record must be a mapping")
+        _require_exact_keys(
+            record,
+            frozenset({"epoch", "train_weighted_mse", "validation_weighted_mse"}),
+            f"checkpoint.training_summary.history[{index - 1}]",
+        )
+        if record["epoch"] != index:
+            raise DenseNet2DAdapterError("checkpoint history epochs are not sequential")
+        for name in ("train_weighted_mse", "validation_weighted_mse"):
+            item = record[name]
+            if (
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not np.isfinite(float(item))
+                or float(item) < 0
+            ):
+                raise DenseNet2DAdapterError(
+                    f"checkpoint history {name} must be finite and non-negative"
+                )
+        validation_losses.append(float(record["validation_weighted_mse"]))
+    selected_epoch = min(range(EPOCHS), key=validation_losses.__getitem__) + 1
+    selected_loss = validation_losses[selected_epoch - 1]
+    declared_loss = value["best_validation_weighted_mse"]
+    if (
+        best_epoch != selected_epoch
+        or isinstance(declared_loss, bool)
+        or not isinstance(declared_loss, (int, float))
+        or float(declared_loss) != selected_loss
+    ):
+        raise DenseNet2DAdapterError(
+            "checkpoint validation-selected epoch/loss is inconsistent with history"
+        )
+
+
+def _validate_backend_runtime(value: object, *, phase: str) -> None:
+    if not isinstance(value, Mapping):
+        raise DenseNet2DAdapterError(f"{phase} runtime must be a mapping")
+    expected = {
+        "training": _TRAINING_RUNTIME_KEYS,
+        "inference": _INFERENCE_RUNTIME_KEYS,
+    }.get(phase)
+    if expected is None:  # pragma: no cover - internal closed call sites
+        raise AssertionError(f"unsupported DenseNet runtime phase: {phase}")
+    _require_exact_keys(value, frozenset(expected), f"{phase} runtime")
+    for name in ("python", "platform", "numpy", "torch"):
+        item = value[name]
+        if not isinstance(item, str) or not item:
+            raise DenseNet2DAdapterError(
+                f"{phase} runtime {name} must be a non-empty string"
+            )
+    torch_cuda_build = value["torch_cuda_build"]
+    if torch_cuda_build is not None and (
+        not isinstance(torch_cuda_build, str) or not torch_cuda_build
+    ):
+        raise DenseNet2DAdapterError(
+            f"{phase} runtime torch_cuda_build must be null or a non-empty string"
+        )
+    if not isinstance(value["cuda_available"], bool):
+        raise DenseNet2DAdapterError(f"{phase} runtime cuda_available must be boolean")
+    device = value["device"]
+    if device not in {"cpu", "cuda"}:
+        raise DenseNet2DAdapterError(f"{phase} runtime device must be cpu or cuda")
+    cuda_device_name = value["cuda_device_name"]
+    if device == "cuda":
+        if (
+            value["cuda_available"] is not True
+            or not isinstance(cuda_device_name, str)
+            or not cuda_device_name
+        ):
+            raise DenseNet2DAdapterError(
+                f"{phase} CUDA runtime must identify an available CUDA device"
+            )
+    elif cuda_device_name is not None:
+        raise DenseNet2DAdapterError(
+            f"{phase} CPU runtime must not identify a CUDA execution device"
+        )
+    peak = value["peak_cuda_memory_bytes"]
+    if isinstance(peak, bool) or not isinstance(peak, int) or peak < 0:
+        raise DenseNet2DAdapterError(
+            f"{phase} runtime peak_cuda_memory_bytes must be a non-negative integer"
+        )
+    if device == "cpu" and peak != 0:
+        raise DenseNet2DAdapterError(
+            f"{phase} CPU runtime peak_cuda_memory_bytes must be zero"
+        )
+    time_keys = {
+        "preprocessing_wall_time_s",
+        "model_initialization_wall_time_s",
+        "backend_wall_time_s",
+        f"{phase}_wall_time_s",
+    }
+    for name in time_keys:
+        item = value[name]
+        if (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not np.isfinite(float(item))
+            or float(item) < 0.0
+        ):
+            raise DenseNet2DAdapterError(
+                f"{phase} runtime {name} must be finite and non-negative"
+            )
+    _canonical_json_bytes(value)
+    _require_no_prescore_metadata(value, role=f"{phase} runtime")
+
+
+def _validate_exact_model_state(
+    value: object,
+    *,
+    candidate: Any,
+    torch: Any,
+) -> Mapping[str, Any]:
+    if type(value) is not dict or not value:
+        raise DenseNet2DAdapterError(
+            "checkpoint model_state must be a non-empty plain dictionary"
+        )
+    expected_state = candidate.state_dict()
+    if set(value) != set(expected_state):
+        raise DenseNet2DAdapterError(
+            "checkpoint model_state keys differ from the pinned architecture"
+        )
+    for name, expected_tensor in expected_state.items():
+        tensor = value[name]
+        if not isinstance(tensor, torch.Tensor):
+            raise DenseNet2DAdapterError(
+                f"checkpoint model_state[{name!r}] must be a tensor"
+            )
+        if (
+            tuple(tensor.shape) != tuple(expected_tensor.shape)
+            or tensor.dtype != expected_tensor.dtype
+            or tensor.layout != expected_tensor.layout
+            or tensor.device.type != expected_tensor.device.type
+        ):
+            raise DenseNet2DAdapterError(
+                f"checkpoint model_state[{name!r}] shape/dtype/layout/device is not exact"
+            )
+        if (tensor.is_floating_point() or tensor.is_complex()) and not bool(
+            torch.isfinite(tensor).all()
+        ):
+            raise DenseNet2DAdapterError(
+                f"checkpoint model_state[{name!r}] is non-finite"
+            )
+    try:
+        candidate.load_state_dict(dict(value), strict=True)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise DenseNet2DAdapterError(
+            "checkpoint model_state is incompatible with the pinned architecture"
+        ) from exc
+    return value
+
+
+def _validate_dependency_closure(
+    value: object,
+    expected: Mapping[str, object],
+) -> None:
+    if not isinstance(value, Mapping):
+        raise DenseNet2DAdapterError("checkpoint dependency_closure must be a mapping")
+    if dict(value) != dict(expected):
+        raise DenseNet2DAdapterError(
+            "checkpoint source dependency closure differs from current pinned sources"
+        )
+    body = {key: value[key] for key in value if key != "closure_sha256"}
+    if value.get("closure_sha256") != _json_sha256(body):
+        raise DenseNet2DAdapterError("checkpoint dependency closure digest is invalid")
+
+
+def _validate_checkpoint_state(
+    state: object,
+    *,
+    repository: Mapping[str, object],
+    dependency_closure: Mapping[str, object],
+    expected_seed: int | None = None,
+) -> Mapping[str, Any]:
+    import torch
+
+    if type(state) is not dict:
+        raise DenseNet2DAdapterError("checkpoint root must be a plain dictionary")
+    _require_exact_keys(state, _CHECKPOINT_KEYS, "checkpoint")
+    if (
+        state["checkpoint_schema"] != CHECKPOINT_SCHEMA
+        or state["checkpoint_schema_version"] != CHECKPOINT_SCHEMA_VERSION
+    ):
+        raise DenseNet2DAdapterError("checkpoint schema/version is unsupported")
+    if (
+        state["method_id"] != METHOD_ID
+        or state["method"] != METHOD_NAME
+        or state["track"] != "common-retrain"
+    ):
+        raise DenseNet2DAdapterError("checkpoint method identity is invalid")
+    seed = state["seed"]
+    if isinstance(seed, bool) or seed not in COMMON_RETRAIN_SEEDS:
+        raise DenseNet2DAdapterError(
+            "checkpoint seed is outside the locked campaign seeds"
+        )
+    if expected_seed is not None and seed != expected_seed:
+        raise DenseNet2DAdapterError("checkpoint seed differs from the requested seed")
+    model = state["model"]
+    if not isinstance(model, Mapping):
+        raise DenseNet2DAdapterError("checkpoint.model must be a mapping")
+    _require_exact_keys(model, _MODEL_KEYS, "checkpoint.model")
+    if dict(model) != _model_contract():
+        raise DenseNet2DAdapterError("checkpoint model contract is invalid")
+    training_config = state["training_config"]
+    if not isinstance(training_config, Mapping) or dict(
+        training_config
+    ) != _training_config(int(seed)):
+        raise DenseNet2DAdapterError("checkpoint training_config is not exact")
+    preprocessing = state["preprocessing"]
+    if (
+        not isinstance(preprocessing, Mapping)
+        or dict(preprocessing) != _preprocessing_contract()
+    ):
+        raise DenseNet2DAdapterError("checkpoint preprocessing contract is not exact")
+    if not isinstance(state["source"], Mapping) or dict(state["source"]) != dict(
+        repository
+    ):
+        raise DenseNet2DAdapterError("checkpoint pinned source identity is not exact")
+    _validate_dependency_closure(state["dependency_closure"], dependency_closure)
+    identities = state["dataset_identities"]
+    if not isinstance(identities, Mapping) or set(identities) != {
+        "train",
+        "validation",
+    }:
+        raise DenseNet2DAdapterError(
+            "checkpoint must identify exactly train and validation artifacts"
+        )
+    train_identity = _validate_dataset_identity(
+        identities["train"], "checkpoint.dataset_identities.train"
+    )
+    validation_identity = _validate_dataset_identity(
+        identities["validation"], "checkpoint.dataset_identities.validation"
+    )
+    if train_identity["sha256"] == validation_identity["sha256"]:
+        raise DenseNet2DAdapterError("checkpoint train and validation identities overlap")
+    _validate_data_geometry(state["data_geometry"])
+    _validate_training_summary(state["training_summary"])
+    _validate_backend_runtime(state["training_runtime"], phase="training")
+    checkpoint_metadata = {
+        key: value for key, value in state.items() if key != "model_state"
+    }
+    _require_no_prescore_metadata(checkpoint_metadata, role="checkpoint metadata")
+    if state["campaign_observations_accepted_for_training"] is not False:
+        raise DenseNet2DAdapterError(
+            "checkpoint must declare that campaign observations were not accepted"
+        )
+    for declaration in (
+        "truth_keys_accepted",
+        "contains_truth",
+        "contains_observation_campaign",
+    ):
+        if state[declaration] is not False:
+            raise DenseNet2DAdapterError(
+                f"checkpoint {declaration} declaration must be false"
+            )
+    candidate = _load_upstream_model(repository, torch=torch)
+    _validate_exact_model_state(state["model_state"], candidate=candidate, torch=torch)
+    return state
+
+
+def _safe_load_checkpoint(
+    snapshot: _ArtifactSnapshot,
+    *,
+    repository: Mapping[str, object],
+    dependency_closure: Mapping[str, object],
+    expected_seed: int | None = None,
+) -> Mapping[str, Any]:
+    if snapshot.size_bytes > 512 * 1024 * 1024:
+        raise DenseNet2DAdapterError("checkpoint exceeds the fail-closed size limit")
+    import torch
+
+    try:
+        state = torch.load(
+            io.BytesIO(snapshot.payload),
+            map_location="cpu",
+            weights_only=True,
+        )
+    except Exception as exc:
+        raise DenseNet2DAdapterError(
+            f"cannot safely decode checkpoint with weights_only=True: {exc}"
+        ) from exc
+    return _validate_checkpoint_state(
+        state,
+        repository=repository,
+        dependency_closure=dependency_closure,
+        expected_seed=expected_seed,
+    )
+
+
+def _prepare_new_outputs(
+    outputs: Sequence[tuple[str | Path, str]],
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    paths = tuple(Path(os.path.abspath(os.fspath(path))) for path, _suffix in outputs)
+    if len(set(paths)) != len(paths):
+        raise ValueError("DenseNet output paths must be distinct")
+    for path, (_raw, suffix) in zip(paths, outputs, strict=True):
+        if os.path.lexists(path) and _path_is_link(path):
+            raise DenseNet2DAdapterError(
+                f"MT2DInv-DenseNet output must not be a symbolic link or junction: {path}"
+            )
+        if path.suffix.lower() != suffix:
+            raise ValueError(f"MT2DInv-DenseNet output {path} must use {suffix}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+    existing = [path for path in paths if os.path.lexists(path)]
+    if existing:
+        raise FileExistsError(
+            "refusing to overwrite existing MT2DInv-DenseNet output(s): "
+            + ", ".join(str(path) for path in existing)
+        )
+    parts = tuple(path.with_name(path.name + ".part") for path in paths)
+    stale = [path for path in parts if os.path.lexists(path)]
+    if stale:
+        raise FileExistsError(
+            "stale MT2DInv-DenseNet partial output(s) require inspection: "
+            + ", ".join(str(path) for path in stale)
+        )
+    return paths, parts
+
+
+def train_common_retrain(
+    *,
+    repository_path: str | Path,
+    train_h5: str | Path,
+    validation_h5: str | Path,
+    seed: int,
+    device: str,
+    checkpoint_out: str | Path,
+    command: Sequence[str] | None = None,
+    runner_source: str | Path | None = None,
+) -> dict[str, object]:
+    """Train one seed once using only train and validation artifacts."""
+    if isinstance(seed, bool) or seed not in COMMON_RETRAIN_SEEDS:
+        raise ValueError(f"seed must be one of {COMMON_RETRAIN_SEEDS}")
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be 'cpu' or 'cuda'")
+    destinations, parts = _prepare_new_outputs(((checkpoint_out, ".pt"),))
+    checkpoint_path = destinations[0]
+    checkpoint_part = parts[0]
+    input_paths = {
+        Path(train_h5).resolve(),
+        Path(validation_h5).resolve(),
+        Path(repository_path).resolve(),
+    }
+    if runner_source is not None:
+        input_paths.add(Path(runner_source).resolve())
+    if checkpoint_path in input_paths:
+        raise ValueError("checkpoint output must differ from every training input")
+
+    repository = verify_pinned_repository(repository_path)
+    dependency_artifacts = _source_dependency_artifacts(
+        repository, runner_source=runner_source
+    )
+    dependency_closure = _dependency_closure(dependency_artifacts)
+    train = load_training_split(train_h5, role="MT2DInv-DenseNet training dataset")
+    validation = load_training_split(
+        validation_h5, role="MT2DInv-DenseNet validation dataset"
+    )
+    _require_same_geometry(train, validation, where="train and validation datasets")
+    _require_disjoint_training_splits(train, validation)
+
+    outcome = _train_model(
+        train,
+        validation,
+        repository,
+        seed=seed,
+        device_name=device,
+    )
+    for role, artifact in {
+        **dependency_artifacts,
+        "train_dataset": train.provenance,
+        "validation_dataset": validation.provenance,
+    }.items():
+        require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+    if verify_pinned_repository(repository_path) != repository:
+        raise DenseNet2DAdapterError(
+            "pinned MT2DInv-DenseNet repository changed during training"
+        )
+
+    checkpoint: dict[str, object] = {
         "checkpoint_schema": CHECKPOINT_SCHEMA,
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "method_id": METHOD_ID,
         "method": METHOD_NAME,
         "track": "common-retrain",
         "seed": seed,
-        "model": {
-            "class": "DenseNetWithICBAM",
-            "blocks": list(MODEL_BLOCKS),
-            "growth_rate": MODEL_GROWTH_RATE,
-            "output_features": MODEL_OUTPUT_FEATURES,
-            "parameter_count": MODEL_PARAMETER_COUNT,
-        },
-        "model_state": outcome.state_dict,
-        "training_config": training_config,
-        "preprocessing": preprocessing,
+        "model": _model_contract(),
+        "model_state": dict(outcome.state_dict),
+        "training_config": _training_config(seed),
+        "preprocessing": _preprocessing_contract(),
         "training_summary": dict(outcome.training_summary),
-        "source": repository,
-        "dataset_identities": dataset_identities,
-        "heldout_truth_available_to_adapter": False,
+        "training_runtime": dict(outcome.runtime),
+        "source": dict(repository),
+        "dependency_closure": dependency_closure,
+        "dataset_identities": {
+            "train": _dataset_identity(train),
+            "validation": _dataset_identity(validation),
+        },
+        "data_geometry": _data_geometry(train),
+        "campaign_observations_accepted_for_training": False,
+        "truth_keys_accepted": False,
+        "contains_truth": False,
+        "contains_observation_campaign": False,
     }
+    _validate_checkpoint_state(
+        checkpoint,
+        repository=repository,
+        dependency_closure=dependency_closure,
+        expected_seed=seed,
+    )
     try:
         _write_bytes_new(checkpoint_part, _checkpoint_bytes(checkpoint))
+        staged = _snapshot_regular_file(checkpoint_part, role="staged checkpoint")
+        _safe_load_checkpoint(
+            staged,
+            repository=repository,
+            dependency_closure=dependency_closure,
+            expected_seed=seed,
+        )
+        for role, artifact in {
+            **dependency_artifacts,
+            "train_dataset": train.provenance,
+            "validation_dataset": validation.provenance,
+        }.items():
+            require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+        if verify_pinned_repository(repository_path) != repository:
+            raise DenseNet2DAdapterError(
+                "pinned MT2DInv-DenseNet repository changed before publication"
+            )
+        _publish_parts(parts, destinations, expected_snapshots=(staged,))
+    finally:
+        checkpoint_part.unlink(missing_ok=True)
+
+    checkpoint_identity = {
+        **_snapshot_core(staged),
+        "path": str(checkpoint_path),
+    }
+    return {
+        "schema": "pimsr-mt2dinv-densenet-common-retrain-training-result",
+        "schema_version": 1,
+        "method_id": METHOD_ID,
+        "method": METHOD_NAME,
+        "seed": seed,
+        "checkpoint": checkpoint_identity,
+        "dependency_closure_sha256": dependency_closure["closure_sha256"],
+        "train_sha256": train.provenance["sha256"],
+        "validation_sha256": validation.provenance["sha256"],
+        "command": list(command) if command is not None else None,
+    }
+
+
+def _require_checkpoint_geometry_matches_observations(
+    checkpoint: Mapping[str, Any],
+    observations: HeldoutObservations,
+) -> None:
+    axes = _validate_data_geometry(checkpoint["data_geometry"])
+    expected = {
+        "frequency_hz": observations.frequencies,
+        "station_x_m": observations.station_x,
+        "x_cell_centers_m": observations.x_grid,
+        "depth_cell_centers_m": observations.depth_grid,
+    }
+    for name, values in expected.items():
+        if not np.array_equal(axes[name], np.asarray(values, dtype=np.float64)):
+            raise DenseNet2DAdapterError(
+                f"checkpoint and truth-free observations have different {name}"
+            )
+
+
+def run_common_inference(
+    *,
+    repository_path: str | Path,
+    checkpoint_path: str | Path,
+    observations_npz: str | Path,
+    device: str,
+    predictions_out: str | Path,
+    runtime_out: str | Path,
+    expected_checkpoint_sha256: str | None = None,
+    expected_observations_sha256: str | None = None,
+    command: Sequence[str] | None = None,
+    runner_source: str | Path | None = None,
+) -> dict[str, object]:
+    """Infer from one reusable checkpoint and one truth-free campaign payload."""
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be 'cpu' or 'cuda'")
+    destinations, parts = _prepare_new_outputs(
+        ((predictions_out, ".npz"), (runtime_out, ".json"))
+    )
+    prediction_path, _runtime_path = destinations
+    prediction_part, runtime_part = parts
+    input_paths = {
+        Path(checkpoint_path).resolve(),
+        Path(observations_npz).resolve(),
+        Path(repository_path).resolve(),
+    }
+    if runner_source is not None:
+        input_paths.add(Path(runner_source).resolve())
+    if any(path in input_paths for path in destinations):
+        raise ValueError("inference outputs must differ from every inference input")
+
+    started_at = datetime.now(UTC)
+    wall_start = time.perf_counter()
+    repository = verify_pinned_repository(repository_path)
+    dependency_artifacts = _source_dependency_artifacts(
+        repository, runner_source=runner_source
+    )
+    dependency_closure = _dependency_closure(dependency_artifacts)
+    checkpoint_snapshot = _snapshot_regular_file(
+        checkpoint_path,
+        role="checkpoint",
+        expected_sha256=expected_checkpoint_sha256,
+    )
+    checkpoint = _safe_load_checkpoint(
+        checkpoint_snapshot,
+        repository=repository,
+        dependency_closure=dependency_closure,
+    )
+    observations_snapshot = _snapshot_regular_file(
+        observations_npz,
+        role="truth-free observations",
+        expected_sha256=expected_observations_sha256,
+    )
+    test = _load_heldout_observations_snapshot(observations_snapshot)
+    if (
+        test.provenance["sha256"] != observations_snapshot.sha256
+        or test.provenance["size_bytes"] != observations_snapshot.size_bytes
+    ):
+        raise DenseNet2DAdapterError(
+            "truth-free observation loader returned a different artifact identity"
+        )
+    _require_checkpoint_geometry_matches_observations(checkpoint, test)
+    training_identities = checkpoint["dataset_identities"]
+    assert isinstance(training_identities, Mapping)
+    if observations_snapshot.sha256 in {
+        training_identities["train"]["sha256"],
+        training_identities["validation"]["sha256"],
+    }:
+        raise DenseNet2DAdapterError(
+            "campaign observation artifact must differ from train and validation"
+        )
+
+    seed = int(checkpoint["seed"])
+    predictions, inference_runtime = _predict_from_checkpoint(
+        test,
+        repository,
+        checkpoint["model_state"],
+        seed=seed,
+        device_name=device,
+    )
+    _validate_backend_runtime(inference_runtime, phase="inference")
+    predictions = np.asarray(predictions, dtype="<f4")
+    expected_shape = (test.sample_index.size, *OUTPUT_GRID_SHAPE)
+    if predictions.shape != expected_shape or not np.isfinite(predictions).all():
+        raise DenseNet2DAdapterError(
+            f"backend predictions must be finite with shape {expected_shape}"
+        )
+
+    for role, artifact in dependency_artifacts.items():
+        require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+    require_file_artifact_unchanged(
+        _snapshot_core(checkpoint_snapshot), role="checkpoint"
+    )
+    require_file_artifact_unchanged(
+        _snapshot_core(observations_snapshot), role="truth-free observations"
+    )
+    if verify_pinned_repository(repository_path) != repository:
+        raise DenseNet2DAdapterError(
+            "pinned MT2DInv-DenseNet repository changed during inference"
+        )
+
+    try:
         _write_bytes_new(
             prediction_part,
             _prediction_npz_bytes(
-                str(test.provenance["sha256"]),
+                observations_snapshot.sha256,
                 test.sample_index,
                 test.x_grid,
                 test.depth_grid,
                 predictions,
             ),
         )
-        checkpoint_staged = file_artifact_provenance(checkpoint_part)
-        prediction_staged = file_artifact_provenance(prediction_part)
-        checkpoint_identity = {**checkpoint_staged, "path": str(checkpoint_path)}
-        prediction_identity = {**prediction_staged, "path": str(prediction_path)}
-
-        finished_at = datetime.now(UTC)
-        bindings = {
+        prediction_staged = _snapshot_regular_file(
+            prediction_part, role="staged predictions"
+        )
+        checkpoint_identity = _snapshot_core(checkpoint_snapshot)
+        prediction_identity = {
+            **_snapshot_core(prediction_staged),
+            "path": str(prediction_path),
+        }
+        train_identity = dict(training_identities["train"])
+        validation_identity = dict(training_identities["validation"])
+        architecture = dependency_artifacts["architecture_source"]
+        adapter = dependency_artifacts["adapter_source"]
+        shared_loader = dependency_artifacts["shared_contract_loader_source"]
+        bindings: dict[str, object] = {
             "training_seed": seed,
             "source_commit": repository["commit"],
             "source_clean_worktree": repository["clean_worktree"],
-            "upstream_source_sha256": architecture_source["sha256"],
-            "adapter_source_sha256": source_artifacts["adapter_source"]["sha256"],
-            "shared_contract_loader_source_sha256": source_artifacts[
-                "shared_contract_loader_source"
-            ]["sha256"],
-            "train_sha256": train.provenance["sha256"],
-            "validation_sha256": validation.provenance["sha256"],
-            "observations_sha256": test.provenance["sha256"],
-            "checkpoint_sha256": checkpoint_identity["sha256"],
-            "prediction_sha256": prediction_identity["sha256"],
+            "upstream_source_sha256": architecture["sha256"],
+            "adapter_source_sha256": adapter["sha256"],
+            "shared_contract_loader_source_sha256": shared_loader["sha256"],
+            "dependency_closure_sha256": dependency_closure["closure_sha256"],
+            "train_sha256": train_identity["sha256"],
+            "validation_sha256": validation_identity["sha256"],
+            "observations_sha256": observations_snapshot.sha256,
+            "checkpoint_sha256": checkpoint_snapshot.sha256,
+            "prediction_sha256": prediction_staged.sha256,
         }
+        if "runner_source" in dependency_artifacts:
+            bindings["runner_source_sha256"] = dependency_artifacts["runner_source"][
+                "sha256"
+            ]
+        source_artifacts = {
+            name: dict(value) for name, value in dependency_artifacts.items()
+        }
+        source_artifacts.update(
+            {
+                "train_dataset": train_identity,
+                "validation_dataset": validation_identity,
+                "heldout_observations": _snapshot_core(observations_snapshot),
+            }
+        )
+        finished_at = datetime.now(UTC)
         runtime = {
             "schema": RUNTIME_SCHEMA,
             "schema_version": RUNTIME_SCHEMA_VERSION,
             "method_id": METHOD_ID,
             "method": METHOD_NAME,
             "track": "common-retrain",
+            "operation": "inference_from_reusable_checkpoint",
             "comparison_status": "unscored_prediction_artifact",
             "ranking_allowed": False,
             "seed": seed,
+            "training_seed": seed,
             "bindings": bindings,
             "started_at_utc": started_at.isoformat(),
             "finished_at_utc": finished_at.isoformat(),
             "adapter_wall_time_s": time.perf_counter() - wall_start,
             "command": list(command) if command is not None else None,
             "working_directory": str(Path.cwd().resolve()),
-            "repository": repository,
-            "source_artifacts": {
-                key: dict(value) for key, value in source_artifacts.items()
+            "repository": dict(repository),
+            "source_artifacts": source_artifacts,
+            "dependency_closure": dict(dependency_closure),
+            "model": dict(checkpoint["model"]),
+            "training_config": dict(checkpoint["training_config"]),
+            "preprocessing": dict(checkpoint["preprocessing"]),
+            "dataset_identities": {
+                "train": train_identity,
+                "validation": validation_identity,
             },
-            "model": checkpoint["model"],
-            "training_config": training_config,
-            "preprocessing": preprocessing,
-            "dataset_identities": dataset_identities,
-            "determinism": {
-                "cublas_workspace_config": ":4096:8",
-                "python_random_seed": seed,
-                "numpy_legacy_global_seed": seed,
-                "torch_manual_seed": seed,
-                "torch_cuda_manual_seed_all": seed,
-                "torch_deterministic_algorithms": True,
-                "cudnn_deterministic": True,
-                "cudnn_benchmark": False,
-                "tf32": False,
-                "data_loader_workers": 0,
+            "training_summary": dict(checkpoint["training_summary"]),
+            "training_runtime": dict(checkpoint["training_runtime"]),
+            "runtime": dict(inference_runtime),
+            "checkpoint_contract": {
+                "schema": CHECKPOINT_SCHEMA,
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "safe_load": "torch.load(weights_only=True)",
+                "seed": seed,
+                "campaign_observations_accepted_for_training": False,
+                "truth_keys_accepted": False,
+                "contains_truth": False,
+                "contains_observation_campaign": False,
+                "dataset_identities": {
+                    "train": train_identity,
+                    "validation": validation_identity,
+                },
+                "checkpoint_sha256": checkpoint_snapshot.sha256,
             },
-            "training_summary": dict(outcome.training_summary),
-            "runtime": dict(outcome.runtime),
             "observation_contract": {
                 "schema": OBSERVATION_SCHEMA,
                 "schema_version": PAYLOAD_SCHEMA_VERSION,
                 "truth_keys_accepted": False,
-                "observations_sha256": str(test.provenance["sha256"]),
+                "observations_sha256": observations_snapshot.sha256,
                 "sample_count": int(test.sample_index.size),
                 "sample_index_sha256": hashlib.sha256(
                     np.asarray(test.sample_index, dtype="<i8").tobytes()
@@ -1250,7 +2453,7 @@ def run_common_retrain(
                 "schema": PREDICTION_SCHEMA,
                 "schema_version": PREDICTION_SCHEMA_VERSION,
                 "keys_exact": list(PREDICTION_KEYS),
-                "observations_sha256": str(test.provenance["sha256"]),
+                "observations_sha256": observations_snapshot.sha256,
                 "observations_sha256_dtype": "<U64",
                 "sample_index_dtype": "<i8",
                 "x_cell_centers_dtype": "<f8",
@@ -1260,26 +2463,42 @@ def run_common_retrain(
                 "prediction_axis_order": ["sample", "depth", "x"],
                 "prediction_unit": "log10_ohm_m",
                 "contains_truth": False,
-                "prediction_sha256": prediction_identity["sha256"],
+                "prediction_sha256": prediction_staged.sha256,
             },
             "outputs": {
                 "checkpoint": checkpoint_identity,
                 "predictions": prediction_identity,
             },
+            "truth_keys_accepted": False,
+            "contains_truth": False,
+            "heldout_truth_available_to_adapter": False,
         }
-        for role, artifact in source_artifacts.items():
+        _require_no_prescore_metadata(runtime, role="DenseNet inference runtime")
+        for role, artifact in dependency_artifacts.items():
             require_file_artifact_unchanged(_artifact_core(artifact), role=role)
-        require_file_artifact_unchanged(checkpoint_staged, role="staged checkpoint")
-        require_file_artifact_unchanged(prediction_staged, role="staged predictions")
+        require_file_artifact_unchanged(
+            _snapshot_core(checkpoint_snapshot), role="checkpoint"
+        )
+        require_file_artifact_unchanged(
+            _snapshot_core(observations_snapshot), role="truth-free observations"
+        )
+        require_file_artifact_unchanged(
+            _snapshot_core(prediction_staged), role="staged predictions"
+        )
         if verify_pinned_repository(repository_path) != repository:
             raise DenseNet2DAdapterError(
                 "pinned MT2DInv-DenseNet repository changed before publication"
             )
         runtime_payload = _canonical_json_bytes(runtime)
         _write_bytes_new(runtime_part, runtime_payload)
-        if runtime_part.read_bytes() != runtime_payload:
-            raise DenseNet2DAdapterError("staged runtime metadata changed after writing")
-        _publish_parts(parts, destinations)
+        runtime_staged = _snapshot_regular_file(runtime_part, role="staged runtime")
+        if runtime_staged.payload != runtime_payload:
+            raise DenseNet2DAdapterError("staged runtime changed after writing")
+        _publish_parts(
+            parts,
+            destinations,
+            expected_snapshots=(prediction_staged, runtime_staged),
+        )
         return runtime
     finally:
         for part in parts:
@@ -1297,6 +2516,7 @@ __all__ = [
     "preprocess_observations",
     "resize_bilinear_half_pixel",
     "resize_log10_resistivity",
-    "run_common_retrain",
+    "run_common_inference",
+    "train_common_retrain",
     "verify_pinned_repository",
 ]

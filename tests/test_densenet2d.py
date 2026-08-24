@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 
@@ -18,7 +21,8 @@ from pimsr_benchmarks.densenet2d import (
     TrainingSplit,
     preprocess_observations,
     resize_log10_resistivity,
-    run_common_retrain,
+    run_common_inference,
+    train_common_retrain,
     verify_pinned_repository,
 )
 from pimsr_benchmarks.runner2d import file_artifact_provenance
@@ -60,6 +64,84 @@ def _write_observations(path: Path, arrays: dict[str, np.ndarray] | None = None)
     return path
 
 
+def _schema_v2_h5(path: Path, *, sample_start: int) -> Path:
+    from pimsr_forward.dataset2d import (
+        _DEFAULT_SENSOR_PARAMETERS_JSON,
+        _write_contract_attrs,
+        _write_dataset_attrs,
+    )
+
+    n = 2
+    observation_shape = (n, *densenet2d.INPUT_GRID_SHAPE)
+    base = np.arange(np.prod(observation_shape), dtype=np.float32).reshape(
+        observation_shape
+    )
+    software_versions = json.dumps(
+        {
+            "discretize": "test",
+            "h5py": "test",
+            "numpy": "test",
+            "pimsr_forward": "test",
+            "pimsr_geogen": "test",
+            "simpeg": "test",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with h5py.File(path, "x") as h5:
+        _write_contract_attrs(
+            h5,
+            generator_seed=91,
+            generation_start_index=sample_start,
+            expected_row_count=n,
+            source_shard_count=1,
+            generation_complete=True,
+            sensor_parameters_json=_DEFAULT_SENSOR_PARAMETERS_JSON,
+            software_versions_json=software_versions,
+        )
+        arrays = {
+            "obs_mt_log10_rho": 1.0 + base / 100.0,
+            "obs_mt_phase": 20.0 + base / 100.0,
+            "clean_mt_log10_rho": 1.1 + base / 100.0,
+            "clean_mt_phase": 21.0 + base / 100.0,
+            "obs_mt_log10_rho_tm": 1.5 + base / 100.0,
+            "obs_mt_phase_tm": 40.0 + base / 100.0,
+            "clean_mt_log10_rho_tm": 1.6 + base / 100.0,
+            "clean_mt_phase_tm": 41.0 + base / 100.0,
+        }
+        for name, values in arrays.items():
+            h5.create_dataset(name, data=values.astype(np.float32))
+        h5.create_dataset(
+            "target_log10_res",
+            data=np.linspace(
+                0.0,
+                1.0,
+                n * np.prod(densenet2d.OUTPUT_GRID_SHAPE),
+                dtype=np.float32,
+            ).reshape(n, *densenet2d.OUTPUT_GRID_SHAPE),
+        )
+        h5.create_dataset("scenario", data=np.asarray([0, 1], dtype=np.int32))
+        h5.create_dataset("has_fault", data=np.asarray([0, 1], dtype=np.uint8))
+        h5.create_dataset(
+            "sample_index",
+            data=np.arange(sample_start, sample_start + n, dtype=np.int64),
+        )
+        h5.create_dataset(
+            "frequencies", data=np.geomspace(0.01, 100.0, 8).astype(np.float64)
+        )
+        h5.create_dataset(
+            "station_x", data=np.linspace(0.0, 11_000.0, 12).astype(np.float64)
+        )
+        h5.create_dataset(
+            "x_grid", data=np.linspace(-500.0, 11_500.0, 48).astype(np.float64)
+        )
+        h5.create_dataset(
+            "depth_grid", data=np.geomspace(10.0, 10_000.0, 64).astype(np.float64)
+        )
+        _write_dataset_attrs(h5)
+    return path
+
+
 def _artifact(path: Path, payload: bytes) -> dict[str, object]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
@@ -90,12 +172,21 @@ def _split(
     )
 
 
-def _heldout(path: Path) -> HeldoutObservations:
-    provenance = _artifact(path, b"truth-free observations")
+def _heldout(
+    path: Path,
+    *,
+    payload: bytes = b"truth-free observations",
+    sample_index: np.ndarray | None = None,
+) -> HeldoutObservations:
+    provenance = _artifact(path, payload)
     return HeldoutObservations(
         observations=np.ones((2, 4, 8, 12), dtype=np.float32),
         evaluation_floors=np.ones((2, 4, 8, 12), dtype=np.float32),
-        sample_index=np.asarray([901, 117], dtype=np.int64),
+        sample_index=(
+            np.asarray([901, 117], dtype=np.int64)
+            if sample_index is None
+            else np.asarray(sample_index, dtype=np.int64)
+        ),
         frequencies=np.geomspace(0.01, 100.0, 8).astype("<f8"),
         station_x=np.linspace(0.0, 11_000.0, 12).astype("<f8"),
         x_grid=np.linspace(-500.0, 11_500.0, 48).astype("<f8"),
@@ -223,6 +314,65 @@ def test_truth_free_loader_rejects_extra_truth_member(tmp_path: Path):
     path = _write_observations(tmp_path / "truth-leak.npz", arrays)
     with pytest.raises(DenseNet2DAdapterError, match="truth-free contract"):
         densenet2d.load_heldout_observations(path)
+
+
+def test_descriptor_snapshot_rejects_rename_between_lstat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    artifact = tmp_path / "artifact.bin"
+    original = tmp_path / "original.bin"
+    replacement = tmp_path / "replacement.bin"
+    artifact.write_bytes(b"artifact-a")
+    replacement.write_bytes(b"artifact-b")
+    real_open = os.open
+
+    def swap_before_open(path: str | bytes | os.PathLike[str], flags: int) -> int:
+        if Path(path) == artifact:
+            os.replace(artifact, original)
+            os.replace(replacement, artifact)
+        return real_open(path, flags)
+
+    monkeypatch.setattr(densenet2d.os, "open", swap_before_open)
+    with pytest.raises(DenseNet2DAdapterError, match="changed before it was opened"):
+        densenet2d._snapshot_regular_file(artifact, role="adversarial artifact")
+
+
+def test_pinned_npz_and_h5_bytes_survive_path_rename_without_provenance_drift(
+    tmp_path: Path,
+):
+    observations_a = _write_observations(tmp_path / "observations-a.npz")
+    arrays_b = _observation_arrays()
+    arrays_b["sample_index"] = np.asarray([7001, 7002], dtype="<i8")
+    observations_b = _write_observations(tmp_path / "observations-b.npz", arrays_b)
+    observation_snapshot = densenet2d._snapshot_regular_file(
+        observations_a, role="truth-free observations"
+    )
+    observations_backup = tmp_path / "observations-a.original.npz"
+    os.replace(observations_a, observations_backup)
+    os.replace(observations_b, observations_a)
+    heldout = densenet2d._load_heldout_observations_snapshot(observation_snapshot)
+    assert heldout.sample_index.tolist() == [901, 117]
+    assert (
+        heldout.provenance["sha256"]
+        == hashlib.sha256(observations_backup.read_bytes()).hexdigest()
+    )
+
+    training_a = _schema_v2_h5(tmp_path / "training-a.h5", sample_start=100)
+    training_b = _schema_v2_h5(tmp_path / "training-b.h5", sample_start=200)
+    training_snapshot = densenet2d._snapshot_regular_file(
+        training_a, role="training dataset"
+    )
+    training_backup = tmp_path / "training-a.original.h5"
+    os.replace(training_a, training_backup)
+    os.replace(training_b, training_a)
+    split = densenet2d._load_training_split_snapshot(
+        training_snapshot, role="training dataset"
+    )
+    assert split.sample_index.tolist() == [100, 101]
+    assert (
+        split.provenance["sha256"]
+        == hashlib.sha256(training_backup.read_bytes()).hexdigest()
+    )
 
 
 def test_coordinate_interpolation_reorder_and_upstream_normalization_are_exact():
@@ -360,149 +510,6 @@ def _fake_run_inputs(tmp_path: Path):
     return repository, train, validation, heldout
 
 
-def _patch_fake_run(
-    monkeypatch: pytest.MonkeyPatch,
-    repository: dict[str, object],
-    train: TrainingSplit,
-    validation: TrainingSplit,
-    heldout: HeldoutObservations,
-) -> None:
-    monkeypatch.setattr(densenet2d, "verify_pinned_repository", lambda _path: repository)
-
-    def fake_split(_path: str | Path, *, role: str) -> TrainingSplit:
-        return train if "training" in role and "validation" not in role else validation
-
-    monkeypatch.setattr(densenet2d, "load_training_split", fake_split)
-    monkeypatch.setattr(densenet2d, "load_heldout_observations", lambda _path: heldout)
-    monkeypatch.setattr(densenet2d, "_checkpoint_bytes", lambda _value: b"checkpoint")
-    monkeypatch.setattr(
-        densenet2d,
-        "_train_and_predict",
-        lambda *_args, **_kwargs: TrainingOutcome(
-            state_dict={},
-            predicted_log10_resistivity=np.full((2, 64, 48), 2.5, np.float32),
-            training_summary={
-                "best_epoch": 17,
-                "best_validation_weighted_mse": 0.25,
-            },
-            runtime={"torch": "fake", "device": "cpu"},
-        ),
-    )
-
-
-def test_common_retrain_publishes_bound_prediction_v2_and_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    repository, train, validation, heldout = _fake_run_inputs(tmp_path)
-    _patch_fake_run(monkeypatch, repository, train, validation, heldout)
-    checkpoint = tmp_path / "outputs" / "seed101.pt"
-    predictions = tmp_path / "outputs" / "seed101.npz"
-    runtime = tmp_path / "outputs" / "seed101.json"
-    result = run_common_retrain(
-        repository_path=tmp_path / "repo",
-        train_h5=train.provenance["path"],
-        validation_h5=validation.provenance["path"],
-        observations_npz=heldout.provenance["path"],
-        seed=101,
-        device="cpu",
-        checkpoint_out=checkpoint,
-        predictions_out=predictions,
-        runtime_out=runtime,
-        command=["python", "run_densenet2d_common.py", "--seed", "101"],
-    )
-    assert checkpoint.read_bytes() == b"checkpoint"
-    with np.load(predictions, allow_pickle=False) as payload:
-        assert tuple(payload.files) == densenet2d.PREDICTION_KEYS
-        assert payload["schema"].item() == densenet2d.PREDICTION_SCHEMA
-        assert payload["schema_version"].item() == 2
-        assert payload["observations_sha256"].item() == heldout.provenance["sha256"]
-        assert payload["observations_sha256"].dtype == np.dtype("<U64")
-        assert payload["sample_index"].dtype == np.dtype("<i8")
-        assert payload["x_cell_centers_m"].dtype == np.dtype("<f8")
-        assert payload["depth_cell_centers_m"].dtype == np.dtype("<f8")
-        assert payload["predicted_log10_resistivity"].dtype == np.dtype("<f4")
-        assert payload["predicted_log10_resistivity"].shape == (2, 64, 48)
-        np.testing.assert_array_equal(payload["sample_index"], [901, 117])
-        np.testing.assert_array_equal(payload["x_cell_centers_m"], heldout.x_grid)
-
-    from pimsr_benchmarks.evaluation2d import load_predictions_2d
-
-    evaluator_input = load_predictions_2d(predictions)
-    assert evaluator_input.observations_sha256 == heldout.provenance["sha256"]
-    published = json.loads(runtime.read_text(encoding="utf-8"))
-    assert published == result
-    assert published["schema"] == densenet2d.RUNTIME_SCHEMA
-    assert published["schema_version"] == 1
-    assert published["method_id"] == "mt2dinv_densenet"
-    assert published["method"] == "MT2DInv-DenseNet/iDenseNet"
-    assert published["seed"] == 101
-    assert published["training_config"]["epochs"] == 200
-    assert published["training_config"]["batch_size"] == 100
-    assert published["training_config"]["optimizer"] == {
-        "name": "Adam",
-        "learning_rate": 1e-4,
-        "betas": [0.9, 0.999],
-        "eps": 1e-8,
-        "weight_decay": 0.0,
-        "amsgrad": False,
-    }
-    assert published["training_config"]["loss"]["non_background_multiplier"] == 10
-    assert (
-        "upstream saves the last epoch"
-        in published["training_config"]["checkpoint_selection_origin"]
-    )
-    assert published["training_config"]["equal_compute_claim"] is False
-    assert published["preprocessing"]["network_input_shape_excluding_batch"] == [
-        16,
-        33,
-        4,
-    ]
-    assert published["preprocessing"][
-        "geometry_and_phase_adaptations_are_benchmark_specific"
-    ]
-    assert (
-        "undefined/NaN"
-        in published["preprocessing"]["normalization"]["zero_channel_policy"]
-    )
-    assert published["observation_contract"]["truth_keys_accepted"] is False
-    assert published["prediction_contract"]["contains_truth"] is False
-    assert published["bindings"]["training_seed"] == 101
-    assert published["bindings"]["source_commit"] == repository["commit"]
-    assert published["bindings"]["source_clean_worktree"] is True
-    assert published["bindings"]["train_sha256"] == train.provenance["sha256"]
-    assert published["bindings"]["validation_sha256"] == validation.provenance["sha256"]
-    assert published["bindings"]["observations_sha256"] == heldout.provenance["sha256"]
-    assert (
-        published["bindings"]["adapter_source_sha256"]
-        == published["source_artifacts"]["adapter_source"]["sha256"]
-    )
-    assert (
-        published["bindings"]["shared_contract_loader_source_sha256"]
-        == published["source_artifacts"]["shared_contract_loader_source"]["sha256"]
-    )
-    assert (
-        published["bindings"]["checkpoint_sha256"]
-        == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-    )
-    assert (
-        published["bindings"]["prediction_sha256"]
-        == hashlib.sha256(predictions.read_bytes()).hexdigest()
-    )
-
-    with pytest.raises(FileExistsError, match="refusing to overwrite"):
-        run_common_retrain(
-            repository_path=tmp_path / "repo",
-            train_h5=train.provenance["path"],
-            validation_h5=validation.provenance["path"],
-            observations_npz=heldout.provenance["path"],
-            seed=101,
-            device="cpu",
-            checkpoint_out=checkpoint,
-            predictions_out=predictions,
-            runtime_out=runtime,
-        )
-
-
 def test_publication_failure_and_interrupt_rollback_owned_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -539,55 +546,636 @@ def test_publication_failure_and_interrupt_rollback_owned_links(
     assert not any(destination.exists() for destination in destinations)
 
 
-def test_source_mutation_aborts_before_publication(
+def test_publication_rejects_staged_replacement_and_post_link_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    repository, train, validation, heldout = _fake_run_inputs(tmp_path)
-    _patch_fake_run(monkeypatch, repository, train, validation, heldout)
-    source_path = Path(str(repository["architecture_source"]["path"]))
-
-    def mutate_then_return(*_args, **_kwargs) -> TrainingOutcome:
-        source_path.write_bytes(b"mutated source")
-        return TrainingOutcome(
-            state_dict={},
-            predicted_log10_resistivity=np.full((2, 64, 48), 2.5, np.float32),
-            training_summary={},
-            runtime={},
-        )
-
-    monkeypatch.setattr(densenet2d, "_train_and_predict", mutate_then_return)
-    outputs = (
-        tmp_path / "mutated" / "checkpoint.pt",
-        tmp_path / "mutated" / "predictions.npz",
-        tmp_path / "mutated" / "runtime.json",
+    replaced_part = tmp_path / "replaced.part"
+    replaced_part.write_bytes(b"validated")
+    replaced_snapshot = densenet2d._snapshot_regular_file(
+        replaced_part, role="validated staged artifact"
     )
-    with pytest.raises(RuntimeError, match="changed after it was loaded"):
-        run_common_retrain(
-            repository_path=tmp_path / "repo",
-            train_h5=train.provenance["path"],
-            validation_h5=validation.provenance["path"],
-            observations_npz=heldout.provenance["path"],
-            seed=101,
-            device="cpu",
-            checkpoint_out=outputs[0],
-            predictions_out=outputs[1],
-            runtime_out=outputs[2],
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"replacement")
+    os.replace(replacement, replaced_part)
+    replaced_destination = tmp_path / "replaced.out"
+    with pytest.raises(DenseNet2DAdapterError, match="changed after validation"):
+        densenet2d._publish_parts(
+            (replaced_part,),
+            (replaced_destination,),
+            expected_snapshots=(replaced_snapshot,),
         )
-    assert not any(path.exists() for path in outputs)
-    assert not any(path.with_name(path.name + ".part").exists() for path in outputs)
+    assert not replaced_destination.exists()
+
+    mutated_part = tmp_path / "mutated.part"
+    mutated_part.write_bytes(b"validated")
+    mutated_snapshot = densenet2d._snapshot_regular_file(
+        mutated_part, role="validated staged artifact"
+    )
+    mutated_destination = tmp_path / "mutated.out"
+    real_link = densenet2d.os.link
+
+    def mutate_after_link(source: Path, destination: Path) -> None:
+        real_link(source, destination)
+        destination.write_bytes(b"post-link mutation")
+
+    monkeypatch.setattr(densenet2d.os, "link", mutate_after_link)
+    with pytest.raises(DenseNet2DAdapterError, match="changed after validation"):
+        densenet2d._publish_parts(
+            (mutated_part,),
+            (mutated_destination,),
+            expected_snapshots=(mutated_snapshot,),
+        )
+    assert not mutated_destination.exists()
 
 
-def test_rejects_noncampaign_seed_before_any_filesystem_work(tmp_path: Path):
+def test_output_symlink_is_rejected_before_path_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    requested = tmp_path / "redirect.pt"
+    real_lexists = densenet2d.os.path.lexists
+    real_is_link = densenet2d._path_is_link
+
+    monkeypatch.setattr(
+        densenet2d.os.path,
+        "lexists",
+        lambda path: Path(path) == requested or real_lexists(path),
+    )
+    monkeypatch.setattr(
+        densenet2d,
+        "_path_is_link",
+        lambda path: Path(path) == requested or real_is_link(path),
+    )
+    with pytest.raises(DenseNet2DAdapterError, match="must not be a symbolic link"):
+        densenet2d._prepare_new_outputs(((requested, ".pt"),))
+
+
+class _StateOnlyModel:
+    def state_dict(self) -> dict[str, object]:
+        import torch
+
+        return {"weight": torch.zeros(1, dtype=torch.float32)}
+
+    def load_state_dict(self, state: dict[str, object], *, strict: bool) -> None:
+        import torch
+
+        assert strict is True
+        if set(state) != {"weight"} or not isinstance(state["weight"], torch.Tensor):
+            raise RuntimeError("incompatible fake state")
+        if tuple(state["weight"].shape) != (1,):
+            raise RuntimeError("incompatible fake tensor shape")
+
+
+def _training_history() -> list[dict[str, object]]:
+    return [
+        {
+            "epoch": epoch,
+            "train_weighted_mse": float(300 - epoch),
+            "validation_weighted_mse": float(abs(epoch - 17) + 0.25),
+        }
+        for epoch in range(1, densenet2d.EPOCHS + 1)
+    ]
+
+
+def _training_runtime(**updates: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "python": "test-python",
+        "platform": "test-platform",
+        "numpy": "test-numpy",
+        "torch": "test-torch",
+        "torch_cuda_build": None,
+        "cuda_available": False,
+        "device": "cpu",
+        "cuda_device_name": None,
+        "peak_cuda_memory_bytes": 0,
+        "preprocessing_wall_time_s": 0.1,
+        "model_initialization_wall_time_s": 0.2,
+        "training_wall_time_s": 1.0,
+        "backend_wall_time_s": 1.3,
+    }
+    runtime.update(updates)
+    return runtime
+
+
+def _inference_runtime(**updates: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "python": "test-python",
+        "platform": "test-platform",
+        "numpy": "test-numpy",
+        "torch": "test-torch",
+        "torch_cuda_build": None,
+        "cuda_available": False,
+        "device": "cpu",
+        "cuda_device_name": None,
+        "peak_cuda_memory_bytes": 0,
+        "preprocessing_wall_time_s": 0.1,
+        "model_initialization_wall_time_s": 0.2,
+        "inference_wall_time_s": 0.3,
+        "backend_wall_time_s": 0.6,
+    }
+    runtime.update(updates)
+    return runtime
+
+
+def _patch_split_training(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: dict[str, object],
+    train: TrainingSplit,
+    validation: TrainingSplit,
+) -> None:
+    import torch
+
+    monkeypatch.setattr(densenet2d, "verify_pinned_repository", lambda _path: repository)
+
+    def fake_split(_path: str | Path, *, role: str) -> TrainingSplit:
+        return train if "training dataset" in role else validation
+
+    monkeypatch.setattr(densenet2d, "load_training_split", fake_split)
+    monkeypatch.setattr(
+        densenet2d,
+        "_load_upstream_model",
+        lambda *_args, **_kwargs: _StateOnlyModel(),
+    )
+    monkeypatch.setattr(
+        densenet2d,
+        "_train_model",
+        lambda *_args, **_kwargs: TrainingOutcome(
+            state_dict={"weight": torch.asarray([1.0], dtype=torch.float32)},
+            training_summary={
+                "best_epoch": 17,
+                "best_validation_weighted_mse": 0.25,
+                "history": _training_history(),
+            },
+            runtime=_training_runtime(),
+        ),
+    )
+
+
+def _train_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, dict[str, object], TrainingSplit, TrainingSplit, Path]:
+    repository, train, validation, _heldout_value = _fake_run_inputs(tmp_path)
+    _patch_split_training(monkeypatch, repository, train, validation)
+    runner = densenet2d._benchmark_runner_source_path()
+    checkpoint = tmp_path / "outputs" / "seed101.pt"
+    result = train_common_retrain(
+        repository_path=tmp_path / "repo",
+        train_h5=train.provenance["path"],
+        validation_h5=validation.provenance["path"],
+        seed=101,
+        device="cpu",
+        checkpoint_out=checkpoint,
+        command=["python", "run_densenet2d_common.py", "train"],
+        runner_source=runner,
+    )
+    assert (
+        result["checkpoint"]["sha256"]
+        == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    )
+    return checkpoint, repository, train, validation, Path(str(runner))
+
+
+def test_train_once_checkpoint_contains_only_train_and_validation_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import inspect
+
+    import torch
+
+    checkpoint, repository, train, validation, runner = _train_checkpoint(
+        tmp_path, monkeypatch
+    )
+    assert "observations_npz" not in inspect.signature(train_common_retrain).parameters
+    assert "train_h5" not in inspect.signature(run_common_inference).parameters
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    assert set(state) == densenet2d._CHECKPOINT_KEYS
+    assert state["checkpoint_schema"] == densenet2d.CHECKPOINT_SCHEMA
+    assert state["checkpoint_schema_version"] == 2
+    assert state["seed"] == 101
+    assert "campaign_seeds" not in state["training_config"]
+    assert set(state["dataset_identities"]) == {"train", "validation"}
+    assert state["dataset_identities"]["train"]["sha256"] == train.provenance["sha256"]
+    assert (
+        state["dataset_identities"]["validation"]["sha256"]
+        == (validation.provenance["sha256"])
+    )
+    assert state["campaign_observations_accepted_for_training"] is False
+    assert state["truth_keys_accepted"] is False
+    assert state["contains_truth"] is False
+    assert state["contains_observation_campaign"] is False
+    assert state["dependency_closure"]["schema"] == (
+        "pimsr-mt2dinv-densenet-source-dependency-closure"
+    )
+    assert state["dependency_closure"]["schema_version"] == 2
+    assert set(state["dependency_closure"]["local_source_artifacts"]) == {
+        "adapter_source",
+        "artifact_guard_source",
+        "architecture_source",
+        "inversion_dataset_contract_source",
+        "materializer_contract_source",
+        "runner_source",
+        "shared_contract_loader_source",
+    }
+    assert state["dependency_closure"]["local_source_artifacts"]["runner_source"][
+        "sha256"
+    ] == (hashlib.sha256(runner.read_bytes()).hexdigest())
+    assert state["dependency_closure"]["cli_entrypoint_source_included"] is True
+    assert (
+        state["dependency_closure"]["required_local_python_source_artifacts_recorded"]
+        is True
+    )
+    assert state["dependency_closure"]["native_binary_environment_complete"] is False
+    assert state["source"] == repository
+    assert b"generator_seed" not in checkpoint.read_bytes()
+
+
+def test_dependency_closure_is_incomplete_without_cli_and_rejects_fake_runner(
+    tmp_path: Path,
+):
+    repository, _train, _validation, _heldout_value = _fake_run_inputs(tmp_path)
+    direct_artifacts = densenet2d._source_dependency_artifacts(
+        repository, runner_source=None
+    )
+    direct_closure = densenet2d._dependency_closure(direct_artifacts)
+    assert direct_closure["cli_entrypoint_source_included"] is False
+    assert direct_closure["required_local_python_source_artifacts_recorded"] is False
+    assert "runner_source" not in direct_closure["local_source_artifacts"]
+
+    fake_runner = _artifact(tmp_path / "not-the-cli.py", b"not the CLI")["path"]
+    with pytest.raises(DenseNet2DAdapterError, match="exact benchmark scripts"):
+        densenet2d._source_dependency_artifacts(
+            repository, runner_source=str(fake_runner)
+        )
+    forged_artifacts = dict(direct_artifacts)
+    forged_artifacts["runner_source"] = file_artifact_provenance(str(fake_runner))
+    with pytest.raises(DenseNet2DAdapterError, match="not the exact benchmark CLI"):
+        densenet2d._dependency_closure(forged_artifacts)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"truth_path": "operator-only-truth.npz"},
+        {"nested": {"withheld_truth": "forbidden"}},
+        {"nested": {"operator_manifest": "forbidden"}},
+        {"nested": {"sample_id_key": "forbidden"}},
+        {"nested": {"generator_seed": 20260824}},
+    ],
+)
+def test_recursive_prescore_metadata_vocabulary_is_rejected(
+    metadata: dict[str, object],
+):
+    with pytest.raises(DenseNet2DAdapterError, match="forbidden pre-score metadata"):
+        densenet2d._require_no_prescore_metadata(metadata, role="adversarial metadata")
+    densenet2d._require_no_prescore_metadata(
+        {
+            "truth_keys_accepted": False,
+            "contains_truth": False,
+            "heldout_truth_available_to_adapter": False,
+        },
+        role="safe declarations",
+    )
+
+
+def test_training_rejects_malformed_outcome_before_checkpoint_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import torch
+
+    repository, train, validation, _heldout_value = _fake_run_inputs(tmp_path)
+    _patch_split_training(monkeypatch, repository, train, validation)
+    good_outcome = densenet2d._train_model()
+    malformed = (
+        (
+            TrainingOutcome(
+                state_dict={"weight": torch.ones(1, dtype=torch.float64)},
+                training_summary=good_outcome.training_summary,
+                runtime=good_outcome.runtime,
+            ),
+            "shape/dtype/layout/device is not exact",
+        ),
+        (
+            TrainingOutcome(
+                state_dict=good_outcome.state_dict,
+                training_summary=good_outcome.training_summary,
+                runtime=_training_runtime(truth_path="operator-only-truth.npz"),
+            ),
+            "training runtime keys mismatch",
+        ),
+    )
+    for index, (outcome, message) in enumerate(malformed):
+        monkeypatch.setattr(
+            densenet2d,
+            "_train_model",
+            lambda *_args, _outcome=outcome, **_kwargs: _outcome,
+        )
+        checkpoint = tmp_path / f"malformed-{index}" / "checkpoint.pt"
+        with pytest.raises(DenseNet2DAdapterError, match=message):
+            train_common_retrain(
+                repository_path=tmp_path / "repo",
+                train_h5=train.provenance["path"],
+                validation_h5=validation.provenance["path"],
+                seed=101,
+                device="cpu",
+                checkpoint_out=checkpoint,
+                runner_source=densenet2d._benchmark_runner_source_path(),
+            )
+        assert not checkpoint.exists()
+        assert not checkpoint.with_name(checkpoint.name + ".part").exists()
+
+
+def test_two_campaigns_reuse_identical_checkpoint_and_publish_truth_free_runtime_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    checkpoint, _repository, train, validation, runner = _train_checkpoint(
+        tmp_path, monkeypatch
+    )
+    campaign_one = _heldout(
+        tmp_path / "campaign-one.npz",
+        payload=b"truth-free campaign one",
+        sample_index=np.asarray([10101, 10102]),
+    )
+    campaign_two = _heldout(
+        tmp_path / "campaign-two.npz",
+        payload=b"truth-free campaign two",
+        sample_index=np.asarray([20201, 20202]),
+    )
+    campaigns = {
+        str(Path(str(campaign_one.provenance["path"])).resolve()): campaign_one,
+        str(Path(str(campaign_two.provenance["path"])).resolve()): campaign_two,
+    }
+    monkeypatch.setattr(
+        densenet2d,
+        "_load_heldout_observations_snapshot",
+        lambda snapshot: campaigns[str(snapshot.path.resolve())],
+    )
+
+    def fake_predict(
+        heldout: HeldoutObservations,
+        _repository: dict[str, object],
+        state: dict[str, object],
+        **_kwargs: object,
+    ) -> tuple[np.ndarray, dict[str, object]]:
+        assert set(state) == {"weight"}
+        value = 2.0 if heldout is campaign_one else 3.0
+        return (
+            np.full((2, 64, 48), value, dtype=np.float32),
+            _inference_runtime(),
+        )
+
+    monkeypatch.setattr(densenet2d, "_predict_from_checkpoint", fake_predict)
+    checkpoint_sha256 = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    # Inference must use only checkpoint lineage and must never reopen the
+    # target-bearing train/validation artifacts.
+    Path(str(train.provenance["path"])).unlink()
+    Path(str(validation.provenance["path"])).unlink()
+    runtimes: list[dict[str, object]] = []
+    for index, heldout in enumerate((campaign_one, campaign_two), start=1):
+        prediction = tmp_path / f"campaign-{index}" / "prediction.npz"
+        runtime_path = tmp_path / f"campaign-{index}" / "runtime.json"
+        runtime = run_common_inference(
+            repository_path=tmp_path / "repo",
+            checkpoint_path=checkpoint,
+            observations_npz=heldout.provenance["path"],
+            expected_checkpoint_sha256=checkpoint_sha256,
+            expected_observations_sha256=str(heldout.provenance["sha256"]),
+            device="cpu",
+            predictions_out=prediction,
+            runtime_out=runtime_path,
+            command=["python", "run_densenet2d_common.py", "infer"],
+            runner_source=runner,
+        )
+        assert json.loads(runtime_path.read_text(encoding="utf-8")) == runtime
+        assert runtime["schema"] == densenet2d.RUNTIME_SCHEMA
+        assert runtime["schema_version"] == 2
+        assert runtime["method_id"] == "mt2dinv_densenet"
+        assert runtime["operation"] == "inference_from_reusable_checkpoint"
+        assert runtime["seed"] == runtime["training_seed"] == 101
+        assert runtime["bindings"]["checkpoint_sha256"] == checkpoint_sha256
+        assert runtime["bindings"]["train_sha256"] == train.provenance["sha256"]
+        assert runtime["bindings"]["validation_sha256"] == validation.provenance["sha256"]
+        assert runtime["bindings"]["observations_sha256"] == heldout.provenance["sha256"]
+        assert (
+            runtime["bindings"]["prediction_sha256"]
+            == hashlib.sha256(prediction.read_bytes()).hexdigest()
+        )
+        assert runtime["outputs"]["checkpoint"]["sha256"] == checkpoint_sha256
+        assert runtime["observation_contract"]["truth_keys_accepted"] is False
+        assert runtime["prediction_contract"]["contains_truth"] is False
+        assert runtime["heldout_truth_available_to_adapter"] is False
+        assert runtime["truth_keys_accepted"] is False
+        assert runtime["contains_truth"] is False
+        assert runtime["checkpoint_contract"]["safe_load"] == (
+            "torch.load(weights_only=True)"
+        )
+        assert (
+            runtime["checkpoint_contract"]["campaign_observations_accepted_for_training"]
+            is False
+        )
+        assert runtime["checkpoint_contract"]["truth_keys_accepted"] is False
+        assert runtime["checkpoint_contract"]["contains_truth"] is False
+        assert runtime["checkpoint_contract"]["contains_observation_campaign"] is False
+        assert set(runtime["dataset_identities"]) == {"train", "validation"}
+        assert (
+            runtime["dependency_closure"]["closure_sha256"]
+            == runtime["bindings"]["dependency_closure_sha256"]
+        )
+        serialized = json.dumps(runtime, sort_keys=True)
+        assert "generator_seed" not in serialized
+        assert "hidden_" not in serialized
+        with np.load(prediction, allow_pickle=False) as payload:
+            assert tuple(payload.files) == densenet2d.PREDICTION_KEYS
+            assert payload["observations_sha256"].item() == heldout.provenance["sha256"]
+            np.testing.assert_array_equal(payload["sample_index"], heldout.sample_index)
+        runtimes.append(runtime)
+    assert {runtime["bindings"]["checkpoint_sha256"] for runtime in runtimes} == {
+        checkpoint_sha256
+    }
+    assert {runtime["bindings"]["observations_sha256"] for runtime in runtimes} == {
+        campaign_one.provenance["sha256"],
+        campaign_two.provenance["sha256"],
+    }
+
+
+def test_inference_rejects_malformed_backend_runtime_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    checkpoint, _repository, _train, _validation, runner = _train_checkpoint(
+        tmp_path, monkeypatch
+    )
+    heldout = _heldout(tmp_path / "campaign.npz", payload=b"campaign")
+    monkeypatch.setattr(
+        densenet2d, "_load_heldout_observations_snapshot", lambda _snapshot: heldout
+    )
+    monkeypatch.setattr(
+        densenet2d,
+        "_predict_from_checkpoint",
+        lambda *_args, **_kwargs: (
+            np.full((2, 64, 48), 2.0, np.float32),
+            _inference_runtime(operator_manifest="operator-only.json"),
+        ),
+    )
+    prediction = tmp_path / "malformed-inference" / "prediction.npz"
+    runtime = tmp_path / "malformed-inference" / "runtime.json"
+    with pytest.raises(DenseNet2DAdapterError, match="inference runtime keys mismatch"):
+        run_common_inference(
+            repository_path=tmp_path / "repo",
+            checkpoint_path=checkpoint,
+            observations_npz=heldout.provenance["path"],
+            device="cpu",
+            predictions_out=prediction,
+            runtime_out=runtime,
+            runner_source=runner,
+        )
+    assert not prediction.exists()
+    assert not runtime.exists()
+
+
+def test_inference_rejects_checkpoint_hash_and_exact_contract_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import torch
+
+    checkpoint, _repository, _train, _validation, runner = _train_checkpoint(
+        tmp_path, monkeypatch
+    )
+    heldout = _heldout(tmp_path / "campaign.npz", payload=b"campaign")
+    monkeypatch.setattr(
+        densenet2d, "_load_heldout_observations_snapshot", lambda _snapshot: heldout
+    )
+    monkeypatch.setattr(
+        densenet2d,
+        "_predict_from_checkpoint",
+        lambda *_args, **_kwargs: (
+            np.full((2, 64, 48), 2.0, np.float32),
+            _inference_runtime(),
+        ),
+    )
+    with pytest.raises(DenseNet2DAdapterError, match="pinned digest"):
+        run_common_inference(
+            repository_path=tmp_path / "repo",
+            checkpoint_path=checkpoint,
+            observations_npz=heldout.provenance["path"],
+            expected_checkpoint_sha256="0" * 64,
+            device="cpu",
+            predictions_out=tmp_path / "bad-hash" / "prediction.npz",
+            runtime_out=tmp_path / "bad-hash" / "runtime.json",
+            runner_source=runner,
+        )
+
+    original = torch.load(checkpoint, map_location="cpu", weights_only=True)
+
+    def extra_key(state: dict[str, object]) -> None:
+        state["unexpected"] = True
+
+    def bad_source(state: dict[str, object]) -> None:
+        state["source"]["commit"] = "0" * 40
+
+    def bad_seed(state: dict[str, object]) -> None:
+        state["seed"] = 999
+
+    def bad_training(state: dict[str, object]) -> None:
+        state["training_config"]["epochs"] = 199
+
+    def bad_data(state: dict[str, object]) -> None:
+        state["dataset_identities"]["validation"]["sha256"] = state["dataset_identities"][
+            "train"
+        ]["sha256"]
+
+    def bad_model_state(state: dict[str, object]) -> None:
+        state["model_state"]["weight"] = torch.asarray([float("nan")])
+
+    def wrong_model_dtype(state: dict[str, object]) -> None:
+        state["model_state"]["weight"] = state["model_state"]["weight"].to(
+            dtype=torch.float64
+        )
+
+    def wrong_model_layout(state: dict[str, object]) -> None:
+        state["model_state"]["weight"] = state["model_state"]["weight"].to_sparse()
+
+    def leaked_generator_metadata(state: dict[str, object]) -> None:
+        state["training_runtime"]["generator_seed"] = 12345
+
+    def leaked_truth_metadata(state: dict[str, object]) -> None:
+        state["training_runtime"]["truth_path"] = "operator-only-truth.npz"
+
+    cases = (
+        (extra_key, "keys mismatch"),
+        (bad_source, "source identity"),
+        (bad_seed, "seed"),
+        (bad_training, "training_config"),
+        (bad_data, "identities overlap"),
+        (bad_model_state, "non-finite"),
+        (wrong_model_dtype, "shape/dtype/layout/device is not exact"),
+        (wrong_model_layout, "shape/dtype/layout/device is not exact"),
+        (leaked_generator_metadata, "training runtime keys mismatch"),
+        (leaked_truth_metadata, "training runtime keys mismatch"),
+    )
+    for index, (mutate, message) in enumerate(cases):
+        state = copy.deepcopy(original)
+        mutate(state)
+        mutated = tmp_path / f"mutation-{index}.pt"
+        torch.save(state, mutated)
+        with pytest.raises(DenseNet2DAdapterError, match=message):
+            run_common_inference(
+                repository_path=tmp_path / "repo",
+                checkpoint_path=mutated,
+                observations_npz=heldout.provenance["path"],
+                device="cpu",
+                predictions_out=tmp_path / f"mutation-{index}" / "prediction.npz",
+                runtime_out=tmp_path / f"mutation-{index}" / "runtime.json",
+                runner_source=runner,
+            )
+
+
+def _unsafe_checkpoint_side_effect(path: str) -> None:
+    Path(path).write_text("unsafe load executed", encoding="utf-8")
+
+
+class _UnsafeCheckpointValue:
+    def __init__(self, marker: Path):
+        self.marker = marker
+
+    def __reduce__(self) -> tuple[object, tuple[str]]:
+        return _unsafe_checkpoint_side_effect, (str(self.marker),)
+
+
+def test_checkpoint_loader_uses_weights_only_and_never_executes_pickle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import torch
+
+    _checkpoint, repository, _train, _validation, runner = _train_checkpoint(
+        tmp_path, monkeypatch
+    )
+    marker = tmp_path / "unsafe-marker"
+    unsafe = tmp_path / "unsafe.pt"
+    torch.save({"payload": _UnsafeCheckpointValue(marker)}, unsafe)
+    heldout = _heldout(tmp_path / "campaign.npz", payload=b"campaign")
+    monkeypatch.setattr(
+        densenet2d, "_load_heldout_observations_snapshot", lambda _snapshot: heldout
+    )
+    with pytest.raises(DenseNet2DAdapterError, match="weights_only=True"):
+        run_common_inference(
+            repository_path=repository["path"],
+            checkpoint_path=unsafe,
+            observations_npz=heldout.provenance["path"],
+            device="cpu",
+            predictions_out=tmp_path / "unsafe" / "prediction.npz",
+            runtime_out=tmp_path / "unsafe" / "runtime.json",
+            runner_source=runner,
+        )
+    assert not marker.exists()
+
+
+def test_train_rejects_noncampaign_seed_before_any_filesystem_work(tmp_path: Path):
     with pytest.raises(ValueError, match="seed must be one of"):
-        run_common_retrain(
+        train_common_retrain(
             repository_path=tmp_path / "missing-repo",
             train_h5=tmp_path / "missing-train",
             validation_h5=tmp_path / "missing-validation",
-            observations_npz=tmp_path / "missing-observations",
             seed=999,
             device="cpu",
             checkpoint_out=tmp_path / "checkpoint.pt",
-            predictions_out=tmp_path / "predictions.npz",
-            runtime_out=tmp_path / "runtime.json",
         )
     assert not (tmp_path / "checkpoint.pt").exists()
