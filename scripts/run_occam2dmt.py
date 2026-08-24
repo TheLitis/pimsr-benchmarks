@@ -654,6 +654,17 @@ def main() -> None:
     for snapshot in iteration_snapshots:
         _require_unchanged(snapshot, kind="Occam iteration output")
 
+    observation_budget_equal = set(requested_modes) == {"te", "tm"}
+    diagnostic_reasons = [
+        (
+            "the normalized-geometry shared score and Occam raw-block objective "
+            "are not the same inverse problem"
+        )
+    ]
+    if not observation_budget_equal:
+        diagnostic_reasons.append(
+            "the solver inverted a mode subset while the diagnostic score uses TE+TM"
+        )
     out: dict = {
         "schema_version": 4,
         "metric_id": SECTION_NRMS_METRIC_ID,
@@ -661,6 +672,10 @@ def main() -> None:
         "scoring_error_contract": scoring_observation_error_contract(),
         "profile": args.profile,
         "modes": ",".join(requested_modes),
+        "inverse_observation_modes": list(requested_modes),
+        "scoring_observation_modes": ["te", "tm"],
+        "observation_budget_equal_to_scoring": observation_budget_equal,
+        "diagnostic_reasons": diagnostic_reasons,
         "n_params": n_params,
         "n_data_blocks": n_blocks,
         "occam_rms": misfit,
@@ -700,6 +715,9 @@ def main() -> None:
                 "solver_frequency_count": len(freqs),
                 "solver_data_block_count": int(n_blocks),
                 "internal_objective_equivalent_to_shared_score": False,
+                "inverse_observation_modes": list(requested_modes),
+                "scoring_observation_modes": ["te", "tm"],
+                "observation_budget_equal_to_scoring": observation_budget_equal,
             },
             "execution": execution,
             "provenance": {

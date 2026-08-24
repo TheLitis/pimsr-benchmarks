@@ -599,6 +599,9 @@ def test_modem_main_publishes_complete_provenance_as_non_comparable(
     assert result["comparison_status"] == "diagnostic_non_comparable"
     assert result["ranking_allowed"] is False
     assert result["headline_claim_allowed"] is False
+    assert result["inverse_observation_modes"] == ["te", "tm"]
+    assert result["scoring_observation_modes"] == ["te", "tm"]
+    assert result["observation_budget_equal_to_scoring"] is True
     assert result["execution"]["convergence_proven"] is True
     assert result["comparison_contract"]["inverse_observation_geometry"] == (
         "densified_model_grid_pseudo_stations"
@@ -707,6 +710,8 @@ def test_occam_main_publishes_trace_and_non_equivalent_objective(
             str(dataset),
             "--workdir",
             str(workdir),
+            "--modes",
+            "tm",
             "--out",
             str(output),
         ],
@@ -718,6 +723,10 @@ def test_occam_main_publishes_trace_and_non_equivalent_objective(
     assert result["comparison_status"] == "diagnostic_non_comparable"
     assert result["ranking_allowed"] is False
     assert result["headline_claim_allowed"] is False
+    assert result["inverse_observation_modes"] == ["tm"]
+    assert result["scoring_observation_modes"] == ["te", "tm"]
+    assert result["observation_budget_equal_to_scoring"] is False
+    assert any("mode subset" in reason for reason in result["diagnostic_reasons"])
     assert result["execution"]["convergence_proven"] is True
     assert result["execution"]["iteration_trace"][0]["iteration"] == 1
     iteration_artifact = result["execution"]["iteration_trace"][0]["artifact"]
