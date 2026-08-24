@@ -361,6 +361,64 @@ def test_split_identity_includes_generator_seed(tmp_path: Path):
         mtdlpy._require_disjoint_samples(train, overlapping_same_campaign, heldout)
 
 
+def test_determinism_seeds_python_numpy_and_torch(monkeypatch: pytest.MonkeyPatch):
+    calls: list[tuple[str, object]] = []
+
+    class _Cuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class _Cudnn:
+        deterministic = False
+        benchmark = True
+        allow_tf32 = True
+
+    class _Matmul:
+        allow_tf32 = True
+
+    class _Backends:
+        cudnn = _Cudnn()
+
+        class cuda:
+            matmul = _Matmul()
+
+    class _Torch:
+        cuda = _Cuda()
+        backends = _Backends()
+
+        @staticmethod
+        def manual_seed(seed: int) -> None:
+            calls.append(("manual_seed", seed))
+
+        @staticmethod
+        def use_deterministic_algorithms(value: bool) -> None:
+            calls.append(("deterministic", value))
+
+        @staticmethod
+        def set_float32_matmul_precision(value: str) -> None:
+            calls.append(("matmul_precision", value))
+
+    python_seeds: list[int] = []
+    numpy_seeds: list[int] = []
+    monkeypatch.setattr(mtdlpy.random, "seed", python_seeds.append)
+    monkeypatch.setattr(mtdlpy.np.random, "seed", numpy_seeds.append)
+
+    mtdlpy._configure_determinism(_Torch(), 101)
+
+    assert python_seeds == [101]
+    assert numpy_seeds == [101]
+    assert calls == [
+        ("manual_seed", 101),
+        ("deterministic", True),
+        ("matmul_precision", "highest"),
+    ]
+    assert _Torch.backends.cudnn.deterministic is True
+    assert _Torch.backends.cudnn.benchmark is False
+    assert _Torch.backends.cudnn.allow_tf32 is False
+    assert _Torch.backends.cuda.matmul.allow_tf32 is False
+
+
 def test_common_retrain_publishes_exact_prediction_contract_and_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

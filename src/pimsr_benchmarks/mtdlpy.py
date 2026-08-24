@@ -13,6 +13,7 @@ import io
 import json
 import os
 import platform
+import random
 import ssl
 import stat
 import subprocess
@@ -604,6 +605,8 @@ def _require_disjoint_samples(
 
 def _configure_determinism(torch: Any, seed: int) -> None:
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -1269,6 +1272,8 @@ def run_common_retrain(
             "preprocessing": preprocessing,
             "determinism": {
                 "cublas_workspace_config": ":4096:8",
+                "python_random_seed": seed,
+                "numpy_legacy_global_seed": seed,
                 "torch_deterministic_algorithms": True,
                 "cudnn_deterministic": True,
                 "cudnn_benchmark": False,
