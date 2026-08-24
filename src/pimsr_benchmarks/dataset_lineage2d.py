@@ -31,7 +31,7 @@ import h5py
 import numpy as np
 
 LINEAGE_SCHEMA = "pimsr-public-dataset-lineage-2d"
-LINEAGE_SCHEMA_VERSION = 1
+LINEAGE_SCHEMA_VERSION = 2
 SHARD_PINS_SCHEMA = "pimsr-public-dataset-shard-pins-2d"
 SHARD_PINS_SCHEMA_VERSION = 1
 EVIDENCE_SCOPE = "artifact_lineage_and_source_identity_without_forward_regeneration"
@@ -137,7 +137,27 @@ _SOURCE_FILES = {
         "src/pimsr_forward/mt2d.py",
         "src/pimsr_forward/sensors.py",
     ),
-    "pimsr_geogen": ("src/pimsr_geogen/section2d.py",),
+    "pimsr_geogen": (
+        "src/pimsr_geogen/generator.py",
+        "src/pimsr_geogen/model.py",
+        "src/pimsr_geogen/rock_physics.py",
+        "src/pimsr_geogen/section2d.py",
+    ),
+}
+
+# The historical schema-v2 HDF5 attribute named ``generator_rng`` records the
+# SectionGenerator stream, but SectionGenerator also delegates construction of
+# its background layered column to GeologyGenerator.  Record both streams in
+# the external lineage evidence so the old immutable datasets remain usable
+# without pretending that their single legacy attribute describes the complete
+# stochastic closure.
+_SOURCE_DERIVED_GENERATION_SEMANTICS = {
+    "base_layer_rng": "numpy.default_rng([generator_seed,sample_index])",
+    "base_layer_scenario": "forced_background_before_2d_scenario_injection",
+    "scenario_policy": "SectionGenerator.sample(sample_index,scenario=None)",
+    "section_rng": "numpy.default_rng([generator_seed,2,sample_index])",
+    "sensor_rng": "numpy.default_rng([generator_seed,3,sample_index])",
+    "status": "derived_from_exact_pinned_source_closure_not_generation_time_execution",
 }
 
 
@@ -1307,6 +1327,7 @@ def build_dataset_lineage_2d(
         "schema_version": LINEAGE_SCHEMA_VERSION,
         "evidence_scope": EVIDENCE_SCOPE,
         "split": split,
+        "source_derived_generation_semantics": dict(_SOURCE_DERIVED_GENERATION_SEMANTICS),
         "inputs": {
             "merged_dataset": {
                 "path": merged_snapshot.path.name,
@@ -1377,6 +1398,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-forward-sensors-sha256", required=True)
     parser.add_argument("--expected-geogen-commit", required=True)
     parser.add_argument("--expected-geogen-origin-remote", required=True)
+    parser.add_argument("--expected-geogen-generator-sha256", required=True)
+    parser.add_argument("--expected-geogen-model-sha256", required=True)
+    parser.add_argument("--expected-geogen-rock-physics-sha256", required=True)
     parser.add_argument("--expected-geogen-section2d-sha256", required=True)
     parser.add_argument("--chunk-rows", type=int, default=_CHUNK_ROWS)
     return parser
@@ -1408,6 +1432,11 @@ def main(argv: list[str] | None = None) -> int:
         expected_geogen_commit=args.expected_geogen_commit,
         expected_geogen_origin_remote=args.expected_geogen_origin_remote,
         expected_geogen_source_sha256={
+            "src/pimsr_geogen/generator.py": args.expected_geogen_generator_sha256,
+            "src/pimsr_geogen/model.py": args.expected_geogen_model_sha256,
+            "src/pimsr_geogen/rock_physics.py": (
+                args.expected_geogen_rock_physics_sha256
+            ),
             "src/pimsr_geogen/section2d.py": args.expected_geogen_section2d_sha256,
         },
         chunk_rows=args.chunk_rows,

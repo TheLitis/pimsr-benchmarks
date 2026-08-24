@@ -299,12 +299,13 @@ def test_builds_canonical_exact_lineage_without_regeneration(case: dict[str, Any
         "schema_version",
         "evidence_scope",
         "split",
+        "source_derived_generation_semantics",
         "inputs",
         "repositories",
         "verification",
     }
     assert manifest["schema"] == lineage.LINEAGE_SCHEMA
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["evidence_scope"] == (
         "artifact_lineage_and_source_identity_without_forward_regeneration"
     )
@@ -319,6 +320,16 @@ def test_builds_canonical_exact_lineage_without_regeneration(case: dict[str, Any
     assert manifest["inputs"]["shard_pin_manifest"]["path"] == "shard-pins.json"
     assert manifest["repositories"]["pimsr_forward"]["path"] == "pimsr_forward"
     assert manifest["repositories"]["pimsr_geogen"]["path"] == "pimsr_geogen"
+    assert manifest["source_derived_generation_semantics"] == {
+        "base_layer_rng": "numpy.default_rng([generator_seed,sample_index])",
+        "base_layer_scenario": "forced_background_before_2d_scenario_injection",
+        "scenario_policy": "SectionGenerator.sample(sample_index,scenario=None)",
+        "section_rng": "numpy.default_rng([generator_seed,2,sample_index])",
+        "sensor_rng": "numpy.default_rng([generator_seed,3,sample_index])",
+        "status": (
+            "derived_from_exact_pinned_source_closure_not_generation_time_execution"
+        ),
+    }
     assert set(manifest["verification"]["arrays"]) == set(lineage._DATASET_KEYS)
     for key in lineage._ROW_KEYS:
         assert manifest["verification"]["arrays"][key]["shard_equality"] == (
@@ -336,6 +347,9 @@ def test_builds_canonical_exact_lineage_without_regeneration(case: dict[str, Any
     assert manifest["repositories"]["pimsr_forward"]["clean_worktree"] is True
     assert set(manifest["repositories"]["pimsr_forward"]["source_files"]) == set(
         lineage._SOURCE_FILES["pimsr_forward"]
+    )
+    assert set(manifest["repositories"]["pimsr_geogen"]["source_files"]) == set(
+        lineage._SOURCE_FILES["pimsr_geogen"]
     )
 
 
@@ -615,5 +629,8 @@ def test_cli_requires_external_hash_and_commit_pins():
         "expected_forward_mt2d_sha256",
         "expected_forward_sensors_sha256",
         "expected_geogen_commit",
+        "expected_geogen_generator_sha256",
+        "expected_geogen_model_sha256",
+        "expected_geogen_rock_physics_sha256",
         "expected_geogen_section2d_sha256",
     } <= required
