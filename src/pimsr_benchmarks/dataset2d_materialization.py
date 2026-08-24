@@ -43,7 +43,10 @@ OPERATOR_MANIFEST_SCHEMA = "pimsr-sota-2d-scoring-manifest"
 MANIFEST_SCHEMA_VERSION = 2
 OBSERVATION_SCHEMA = "pimsr-sota-2d-observations"
 TRUTH_SCHEMA = "pimsr-sota-2d-truth"
+# Observation payload v1 was published before the withheld truth gained an
+# explicit observations digest.  Keep their versions independent.
 PAYLOAD_SCHEMA_VERSION = 1
+TRUTH_PAYLOAD_SCHEMA_VERSION = 2
 UNCERTAINTY_POLICY_ID = "declared_evaluation_floors_log10_rho_phase_v1"
 
 DEFAULT_RHO_LOG10_FLOOR = 0.05
@@ -425,7 +428,7 @@ def _load_source_arrays(
         )
         truth = {
             "schema": _unicode_scalar(TRUTH_SCHEMA),
-            "schema_version": _canonical_array(PAYLOAD_SCHEMA_VERSION, "<i8"),
+            "schema_version": _canonical_array(TRUTH_PAYLOAD_SCHEMA_VERSION, "<i8"),
             "sample_index": sample_index.copy(),
             "scenario": scenario,
             "has_fault": has_fault,
@@ -515,6 +518,7 @@ def _truth_members(
         "schema": (),
         "schema_version": (),
         "sample_index": ("sample",),
+        "observations_sha256": (),
         "scenario": ("sample",),
         "has_fault": ("sample",),
         "x_cell_centers_m": ("x",),
@@ -525,6 +529,7 @@ def _truth_members(
         "schema",
         "schema_version",
         "sample_index",
+        "observations_sha256",
         "scenario",
         "has_fault",
         "x_cell_centers_m",
@@ -615,6 +620,7 @@ def _payload_record(
     path: Path,
     *,
     schema: str,
+    schema_version: int,
     digest: str,
     size: int,
     arrays: Mapping[str, Mapping[str, object]],
@@ -624,7 +630,7 @@ def _payload_record(
         "file_name": path.name,
         "media_type": "application/x-npz",
         "schema": schema,
-        "schema_version": PAYLOAD_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "sha256": digest,
         "size_bytes": size,
     }
@@ -718,6 +724,7 @@ def _operator_manifest(
             "observations": _payload_record(
                 observations_path,
                 schema=OBSERVATION_SCHEMA,
+                schema_version=PAYLOAD_SCHEMA_VERSION,
                 digest=observations_sha256,
                 size=observations_size,
                 arrays=observation_records,
@@ -725,6 +732,7 @@ def _operator_manifest(
             "withheld_truth": _payload_record(
                 truth_path,
                 schema=TRUTH_SCHEMA,
+                schema_version=TRUTH_PAYLOAD_SCHEMA_VERSION,
                 digest=truth_sha256,
                 size=truth_size,
                 arrays=truth_records,
@@ -950,10 +958,11 @@ def materialize_dataset2d(
         observation_records = _write_deterministic_npz(
             parts[0], _observation_members(observations)
         )
-        truth_records = _write_deterministic_npz(parts[1], _truth_members(truth))
         _verify_npz(parts[0], observation_records)
-        _verify_npz(parts[1], truth_records)
         observations_sha256, observations_size = _sha256_file(parts[0])
+        truth["observations_sha256"] = _unicode_scalar(observations_sha256)
+        truth_records = _write_deterministic_npz(parts[1], _truth_members(truth))
+        _verify_npz(parts[1], truth_records)
         truth_sha256, truth_size = _sha256_file(parts[1])
         public_manifest = _public_manifest(
             observations_sha256=observations_sha256,

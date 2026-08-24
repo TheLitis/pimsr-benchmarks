@@ -222,6 +222,7 @@ def test_materialization_separates_observations_and_truth(
         "schema",
         "schema_version",
         "sample_index",
+        "observations_sha256",
         "scenario",
         "has_fault",
         "x_cell_centers_m",
@@ -231,7 +232,11 @@ def test_materialization_separates_observations_and_truth(
     with np.load(truth_path, allow_pickle=False) as truth:
         assert set(truth.files) == truth_keys
         assert truth["schema"].item() == "pimsr-sota-2d-truth"
+        assert truth["schema_version"].item() == 2
         np.testing.assert_array_equal(truth["sample_index"], expected_ids)
+        assert truth["observations_sha256"].item() == hashlib.sha256(
+            observations_path.read_bytes()
+        ).hexdigest()
         np.testing.assert_array_equal(
             truth["scenario"], ["background", "aquifer", "geothermal"]
         )
@@ -301,6 +306,7 @@ def test_materialization_separates_observations_and_truth(
         operator["artifacts"]["withheld_truth"]["sha256"]
         == hashlib.sha256(truth_path.read_bytes()).hexdigest()
     )
+    assert operator["artifacts"]["withheld_truth"]["schema_version"] == 2
     assert operator["artifacts"]["public_observation_manifest"]["sha256"] == (
         hashlib.sha256(public_manifest_path.read_bytes()).hexdigest()
     )
