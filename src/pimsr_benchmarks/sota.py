@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _PACKAGE_REGISTRY_PATH = Path(__file__).resolve().parent / "data" / "sota_methods.json"
 _PACKAGE_PROTOCOL_PATH = Path(__file__).resolve().parent / "data" / "SOTA_PROTOCOL.md"
 _REPOSITORY_REGISTRY_PATH = (
@@ -33,6 +33,7 @@ DEFAULT_PROTOCOL_PATH = (
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DOI_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:a-z0-9]+$", re.IGNORECASE)
 _SPDX_RE = re.compile(r"^[A-Za-z0-9.+-]+$")
 _GIT_ARTIFACT_RE = re.compile(r"^git:([0-9a-f]{40})(?::[A-Za-z0-9._/+:-]+)?$")
@@ -86,8 +87,13 @@ _GENERATOR_KEYS = {
     "entrypoint",
     "materialization_status",
     "command_template",
-    "sample_count",
-    "master_seed",
+    "campaign_count",
+    "samples_per_campaign",
+    "seed_policy",
+    "seed_commitment_encoding",
+    "seed_commitment_sha256",
+    "sample_id_policy",
+    "sample_id_key_commitment_sha256",
     "start_index",
     "grouping_contract",
     "physical_contract",
@@ -224,6 +230,13 @@ def _string_list(value: Any, path: str, *, nonempty: bool = True) -> list[str]:
     result = [_string(item, f"{path}[{index}]") for index, item in enumerate(items)]
     if len(result) != len(set(result)):
         raise _error(path, "must not contain duplicates")
+    return result
+
+
+def _sha256(value: Any, path: str) -> str:
+    result = _string(value, path)
+    if not _SHA256_RE.fullmatch(result):
+        raise _error(path, "must be a 64-character lowercase SHA-256 digest")
     return result
 
 
@@ -432,8 +445,8 @@ def _validate_generated_dataset(dataset: Mapping[str, Any], path: str) -> None:
         )
     generator = _mapping(dataset["generator"], f"{path}.generator")
     _exact_keys(generator, _GENERATOR_KEYS, f"{path}.generator")
-    if type(generator["schema_version"]) is not int or generator["schema_version"] != 1:
-        raise _error(f"{path}.generator.schema_version", "must be integer 1")
+    if type(generator["schema_version"]) is not int or generator["schema_version"] != 2:
+        raise _error(f"{path}.generator.schema_version", "must be integer 2")
     if generator["producer_id"] != "pimsr-forward":
         raise _error(f"{path}.generator.producer_id", "must be 'pimsr-forward'")
     _https_url(generator["repository_url"], f"{path}.generator.repository_url")
@@ -451,44 +464,73 @@ def _validate_generated_dataset(dataset: Mapping[str, Any], path: str) -> None:
     )
     if generator["entrypoint"] != "pimsr-forward-dataset2d":
         raise _error(f"{path}.generator.entrypoint", "must be 'pimsr-forward-dataset2d'")
-    if generator["materialization_status"] != "conditional_not_materialized":
+    if generator["materialization_status"] != "seed_committed_not_materialized":
         raise _error(
             f"{path}.generator.materialization_status",
-            "must be 'conditional_not_materialized'",
+            "must be 'seed_committed_not_materialized'",
         )
-    sample_count = generator["sample_count"]
-    master_seed = generator["master_seed"]
+    campaign_count = generator["campaign_count"]
+    samples_per_campaign = generator["samples_per_campaign"]
     start_index = generator["start_index"]
-    for name, number, minimum in (
-        ("sample_count", sample_count, 1),
-        ("master_seed", master_seed, 0),
+    for name, number, expected in (
+        ("campaign_count", campaign_count, 5),
+        ("samples_per_campaign", samples_per_campaign, 500),
         ("start_index", start_index, 0),
     ):
-        if type(number) is not int or number < minimum:
-            raise _error(f"{path}.generator.{name}", f"must be integer >= {minimum}")
+        if type(number) is not int or number != expected:
+            raise _error(f"{path}.generator.{name}", f"must be integer {expected}")
+    if generator["seed_policy"] != "operator_withheld_until_predictions_locked":
+        raise _error(
+            f"{path}.generator.seed_policy",
+            "must keep seeds operator-withheld until predictions are locked",
+        )
+    if (
+        generator["seed_commitment_encoding"]
+        != "utf8-canonical-json-int64-array-no-newline-v1"
+    ):
+        raise _error(
+            f"{path}.generator.seed_commitment_encoding",
+            "must use the canonical hidden-seed commitment encoding",
+        )
+    _sha256(
+        generator["seed_commitment_sha256"],
+        f"{path}.generator.seed_commitment_sha256",
+    )
+    if generator["sample_id_policy"] != "hmac_sha256_opaque_nonnegative_int64_v1":
+        raise _error(
+            f"{path}.generator.sample_id_policy",
+            "must use opaque HMAC-derived sample identifiers",
+        )
+    _sha256(
+        generator["sample_id_key_commitment_sha256"],
+        f"{path}.generator.sample_id_key_commitment_sha256",
+    )
     command = _string_list(
         generator["command_template"], f"{path}.generator.command_template"
     )
     expected_command = [
         "pimsr-forward-dataset2d",
         "--out",
-        "<new-output.h5>",
+        "<operator-only-new-output.h5>",
         "--n",
-        str(sample_count),
+        str(samples_per_campaign),
         "--seed",
-        str(master_seed),
+        "<operator-withheld-seed>",
         "--start-index",
         str(start_index),
     ]
     if command != expected_command:
         raise _error(
             f"{path}.generator.command_template",
-            "does not match the declared sample count, seed and start index",
+            "does not match the declared campaign size and withheld-seed policy",
         )
-    if generator["grouping_contract"] != "scenario/sample_index/noise_realization_v1":
+    if (
+        generator["grouping_contract"]
+        != "withheld_scenario/opaque_sample_id/noise_realization_v2"
+    ):
         raise _error(
             f"{path}.generator.grouping_contract",
-            "must be 'scenario/sample_index/noise_realization_v1'",
+            "must use the hidden grouped-split v2 contract",
         )
     physical = _mapping(
         generator["physical_contract"], f"{path}.generator.physical_contract"
@@ -519,10 +561,18 @@ def _validate_generated_dataset(dataset: Mapping[str, Any], path: str) -> None:
         generator["required_snapshot_roles"],
         f"{path}.generator.required_snapshot_roles",
     )
-    if set(roles) != {"coordinates", "dataset", "observations", "split_groups", "truth"}:
+    if set(roles) != {
+        "coordinates",
+        "operator_scoring_manifest",
+        "operator_source_dataset",
+        "public_observation_manifest",
+        "public_observations",
+        "split_groups",
+        "withheld_truth",
+    }:
         raise _error(
             f"{path}.generator.required_snapshot_roles",
-            "must require dataset, observations, truth, coordinates and split_groups",
+            "must separate public method inputs from operator-only source and truth",
         )
 
 

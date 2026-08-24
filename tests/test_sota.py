@@ -68,7 +68,7 @@ def test_repository_registry_is_valid_and_complete():
 def test_registry_cli_reports_valid_summary(capsys):
     assert main([str(REGISTRY_PATH)]) == 0
     assert capsys.readouterr().out.strip() == (
-        "valid pimsr-sota-methods schema=1 methods=19 datasets=7"
+        "valid pimsr-sota-methods schema=2 methods=19 datasets=7"
     )
 
 
@@ -214,6 +214,43 @@ def test_unavailable_artifact_cannot_claim_a_url(registry):
 def test_dataset_hash_policy_is_mandatory(registry):
     registry["datasets"][0]["checksum_policy"] = "trust_official_url"
     with pytest.raises(RegistryValidationError, match="sha256_required_before_run"):
+        validate_registry(registry)
+
+
+def test_hidden_generated_dataset_never_publishes_seed_or_source_indices(registry):
+    generated = next(
+        item for item in registry["datasets"] if item["id"] == "pimsr_generated_2d_v1"
+    )
+    generator = generated["generator"]
+
+    assert generator["schema_version"] == 2
+    assert "master_seed" not in generator
+    assert "sample_count" not in generator
+    assert generator["campaign_count"] == 5
+    assert generator["samples_per_campaign"] == 500
+    assert generator["seed_policy"] == "operator_withheld_until_predictions_locked"
+    assert generator["command_template"][6] == "<operator-withheld-seed>"
+    assert len(generator["seed_commitment_sha256"]) == 64
+    assert len(generator["sample_id_key_commitment_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("seed_commitment_sha256", "a" * 63, "64-character"),
+        ("sample_id_key_commitment_sha256", "A" * 64, "lowercase"),
+        ("seed_policy", "public_seed", "operator-withheld"),
+        ("campaign_count", 4, "integer 5"),
+    ],
+)
+def test_hidden_generated_dataset_commitment_contract_is_fail_closed(
+    registry, field, value, message
+):
+    generated = next(
+        item for item in registry["datasets"] if item["id"] == "pimsr_generated_2d_v1"
+    )
+    generated["generator"][field] = value
+    with pytest.raises(RegistryValidationError, match=message):
         validate_registry(registry)
 
 

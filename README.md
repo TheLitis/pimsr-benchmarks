@@ -44,9 +44,13 @@ Validate the installed immutable registry with `pimsr-sota-validate` (or pass
 an alternate registry JSON path as its only argument).
 
 The registry also pins PIMSR itself and a conditional
-`pimsr_generated_2d_v1` generation definition. The latter is deliberately
-`not_yet_materialized`: it has no registered dataset bytes or checksum and
-cannot produce a leaderboard row. Execution provenance uses four strict,
+`pimsr_generated_2d_v1` hidden generation definition. Public SHA-256
+commitments fix five operator-only campaign seeds and the opaque sample-ID key
+before execution. Methods receive only a public observation manifest; source
+seeds and indices, geological groups and truth remain in a separate
+operator-scoring manifest until predictions are locked. The dataset is still
+`not_yet_materialized` and cannot produce a leaderboard row. Execution
+provenance uses four strict,
 versioned JSON schemas (experiment, observations, predictions and run). Schema
 v1 is deliberately capped at `adapter_smoke_passed`: it hashes opaque payload
 files but does not inspect and prove typed HDF5/NPZ arrays, every seed in a

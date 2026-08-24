@@ -1,7 +1,7 @@
 # PIMSR SOTA comparison protocol
 
-Version: 1.0 (2026-08-23)
-Registry schema: `config/sota_methods.json`, version 1
+Version: 1.1 (2026-08-24)
+Registry schema: `config/sota_methods.json`, version 2
 
 ## Purpose and admissibility
 
@@ -282,11 +282,20 @@ Readiness is monotonic and never inferred from prose:
 | `benchmark_complete` | Reserved for a future schema that proves typed payload arrays, the complete seed campaign, runtime/resources and metric provenance. Schema v1 rejects this status. | No under schema v1. |
 
 The registered `pimsr_generated_2d_v1` dataset is intentionally conditional.
-Its schema-v2 generator commit, command template and physical contract are
-pinned, but no dataset/truth bytes or checksums are claimed. It remains
-`conditional_not_materialized` until a separately published observation
-manifest supplies all required hashes; a validator rejects prediction
-promotion while it is in that state.
+Its schema-v2 generator commit, campaign size and physical contract are pinned,
+but hidden generator seeds and source sample indices are not public method
+inputs. Five campaign seeds and the opaque sample-ID key are fixed before any
+run through public SHA-256 commitments. Their values, the source HDF5, truth,
+geological families and source-to-opaque-ID mapping remain operator-only until
+all compared predictions are immutable. A separate public observation manifest
+contains no truth-derived labels or recoverable generator identity.
+
+A dataset made from the previously preregistered public seed `20260823` is
+development/smoke data only. Because the open deterministic generator can
+reconstruct its truth from that seed and generator row index, it is ineligible
+as a hidden test regardless of file permissions. Hidden materialization remains
+`seed_committed_not_materialized` until public-observation and operator-scoring
+artifacts are separately hashed; prediction promotion is rejected before then.
 
 ## Execution gates
 

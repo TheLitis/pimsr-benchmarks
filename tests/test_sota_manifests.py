@@ -268,6 +268,14 @@ def test_registry_marks_pimsr_and_generated_dataset_honestly():
     assert generated["generator"]["source_commit"] == (
         "dc36edac75dbd51cc92679a35f38d42d0e276299"
     )
+    assert generated["generator"]["materialization_status"] == (
+        "seed_committed_not_materialized"
+    )
+    assert "master_seed" not in generated["generator"]
+    assert generated["generator"]["campaign_count"] == 5
+    assert generated["generator"]["seed_policy"] == (
+        "operator_withheld_until_predictions_locked"
+    )
     assert "sha256" not in generated
     assert generated["checksum_policy"] == "sha256_required_before_run"
 

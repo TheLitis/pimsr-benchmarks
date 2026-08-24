@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "registry_id": "pimsr-sota-methods",
-  "as_of_date": "2026-08-23",
+  "as_of_date": "2026-08-24",
   "protocol_document": "docs/SOTA_PROTOCOL.md",
   "methods": [
     {
@@ -866,24 +866,30 @@
         "caveat": "The generator source is MIT licensed; a future generated artifact requires its own immutable manifest and provenance."
       },
       "caveats": [
-        "This is a conditional generation definition, not an existing dataset: no bytes, truth arrays or checksums are currently registered.",
-        "The schema-v2 generator source is pinned, but no benchmark dataset bytes have been generated or registered.",
-        "Materialization must publish observation, truth, coordinate and grouped split hashes before any adapter or benchmark status can be claimed.",
+        "This is a conditional hidden-test definition, not an existing public dataset: no observation, truth or source HDF5 bytes are registered.",
+        "Five operator-only random seeds and the opaque sample-ID key were fixed before execution through public SHA-256 commitments; their values remain withheld until every compared method has published immutable predictions.",
+        "The earlier reproducible seed 20260823 artifact is development/smoke data and is explicitly ineligible as hidden test data because its truth can be regenerated from the public source, seed and sample indices.",
+        "Materialization must expose only an observation manifest to methods and retain source seed, source indices, geological families and truth in a separately access-controlled scoring manifest.",
         "An independently verified scoring solve and non-overlapping train/validation/refinement/hidden-test groups are still required by the protocol."
       ],
       "generator": {
-        "schema_version": 1,
+        "schema_version": 2,
         "producer_id": "pimsr-forward",
         "repository_url": "https://github.com/TheLitis/pimsr-forward",
         "source_commit": "dc36edac75dbd51cc92679a35f38d42d0e276299",
         "source_status": "artifact_pinned",
         "entrypoint": "pimsr-forward-dataset2d",
-        "materialization_status": "conditional_not_materialized",
-        "command_template": ["pimsr-forward-dataset2d", "--out", "<new-output.h5>", "--n", "500", "--seed", "20260823", "--start-index", "0"],
-        "sample_count": 500,
-        "master_seed": 20260823,
+        "materialization_status": "seed_committed_not_materialized",
+        "command_template": ["pimsr-forward-dataset2d", "--out", "<operator-only-new-output.h5>", "--n", "500", "--seed", "<operator-withheld-seed>", "--start-index", "0"],
+        "campaign_count": 5,
+        "samples_per_campaign": 500,
+        "seed_policy": "operator_withheld_until_predictions_locked",
+        "seed_commitment_encoding": "utf8-canonical-json-int64-array-no-newline-v1",
+        "seed_commitment_sha256": "b4ff00c55a1798e01fc85a980edf0642be27d31938a5112f3f2b63f8d5cdba0b",
+        "sample_id_policy": "hmac_sha256_opaque_nonnegative_int64_v1",
+        "sample_id_key_commitment_sha256": "67a65552f07d792cf079f9fc57b4b523812f174bcc1ffe52abf38a33bb050e09",
         "start_index": 0,
-        "grouping_contract": "scenario/sample_index/noise_realization_v1",
+        "grouping_contract": "withheld_scenario/opaque_sample_id/noise_realization_v2",
         "physical_contract": {
           "dataset_schema": "pimsr-mt-2d",
           "dataset_schema_version": 2,
@@ -900,7 +906,7 @@
           "time_convention": "exp(+i_omega_t)",
           "resistivity_unit": "ohm_m"
         },
-        "required_snapshot_roles": ["dataset", "observations", "truth", "coordinates", "split_groups"]
+        "required_snapshot_roles": ["operator_source_dataset", "public_observations", "withheld_truth", "coordinates", "split_groups", "public_observation_manifest", "operator_scoring_manifest"]
       }
     }
   ]
