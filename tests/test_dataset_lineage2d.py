@@ -294,6 +294,12 @@ def test_builds_canonical_exact_lineage_without_regeneration(case: dict[str, Any
     assert raw == _canonical_bytes(manifest)
     assert result.sha256 == hashlib.sha256(raw).hexdigest()
     assert result.size_bytes == len(raw)
+    with pytest.raises(TypeError):
+        result.manifest["schema"] = "tampered"  # type: ignore[index]
+    frozen_verification = result.manifest["verification"]
+    with pytest.raises(TypeError):
+        frozen_verification["sample_count"] = 0  # type: ignore[index]
+    assert result.path.read_bytes() == raw
     assert set(manifest) == {
         "schema",
         "schema_version",
@@ -565,55 +571,239 @@ def test_existing_output_is_never_overwritten(case: dict[str, Any]):
     assert not case["output"].with_name(case["output"].name + ".part").exists()
 
 
-def test_publication_failure_rolls_back_own_hardlink(
+def test_lineage_publication_normalizes_dotdot_without_creating_false_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+    requested = Path("unused-segment") / ".." / "lineage.json"
+
+    published, _, _ = lineage._publish_canonical_json(requested, {"value": 1})
+
+    assert published == tmp_path / "lineage.json"
+    assert published.exists()
+    assert not (tmp_path / "unused-segment").exists()
+
+
+def test_publication_early_failure_leaves_exclusive_artifact_sealed(
     case: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ):
-    real_link = os.link
+    captured: bytes | None = None
 
-    def link_then_fail(source: Path, destination: Path) -> None:
-        real_link(source, destination)
-        raise OSError("injected post-link failure")
+    def interrupted_write(descriptor: int, payload: bytes) -> None:
+        nonlocal captured
+        captured = payload[:13]
+        assert os.write(descriptor, captured) == len(captured)
+        raise KeyboardInterrupt
 
-    monkeypatch.setattr(lineage.os, "link", link_then_fail)
-    with pytest.raises(OSError, match="injected"):
+    monkeypatch.setattr(lineage, "_write_all_descriptor", interrupted_write)
+    with pytest.raises(KeyboardInterrupt):
         _build(case)
-    assert not case["output"].exists()
+
+    assert captured is not None
+    assert case["output"].read_bytes() == captured
+    assert case["output"].stat().st_mode & 0o222 == 0
     assert not case["output"].with_name(case["output"].name + ".part").exists()
 
 
-def test_publication_rollback_preserves_foreign_replacement(
+def test_lineage_receipt_reseals_mode_changed_before_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    destination = tmp_path / "resealed.json"
+    real_receipt = lineage._stable_lineage_receipt
+
+    def change_mode_then_reopen(*args: Any, **kwargs: Any):
+        os.chmod(destination, 0o600)
+        return real_receipt(*args, **kwargs)
+
+    monkeypatch.setattr(lineage, "_stable_lineage_receipt", change_mode_then_reopen)
+    published, digest, size = lineage._publish_canonical_json(destination, {"value": 1})
+
+    assert published == destination.absolute()
+    assert destination.stat().st_mode & 0o222 == 0
+    assert digest == hashlib.sha256(destination.read_bytes()).hexdigest()
+    assert size == destination.stat().st_size
+
+
+def test_publication_detects_same_inode_same_size_mutation(
     case: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ):
-    def foreign_then_fail(source: Path, destination: Path) -> None:
-        Path(destination).write_bytes(b"foreign replacement")
-        raise OSError("publication race")
+    destination = case["output"]
+    real_read = lineage._read_all_descriptor
+    calls = 0
 
-    monkeypatch.setattr(lineage.os, "link", foreign_then_fail)
-    with pytest.raises(
-        lineage.DatasetLineageError, match="refusing destructive rollback"
-    ):
+    def mutate_after_first_read(descriptor: int) -> bytes:
+        nonlocal calls
+        payload = real_read(descriptor)
+        calls += 1
+        if calls == 1:
+            changed = bytearray(payload)
+            changed[-2] ^= 1
+            os.chmod(destination, 0o600)
+            with destination.open("r+b") as stream:
+                stream.write(changed)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(destination, 0o444)
+        return payload
+
+    monkeypatch.setattr(lineage, "_read_all_descriptor", mutate_after_first_read)
+    with pytest.raises(lineage.DatasetLineageError, match="changed during|cannot verify"):
         _build(case)
-    assert case["output"].read_bytes() == b"foreign replacement"
-    assert not case["output"].with_name(case["output"].name + ".part").exists()
+
+    assert destination.exists()
+    assert destination.stat().st_mode & 0o222 == 0
 
 
-def test_publication_detects_replacement_after_successful_hardlink(
+def test_lineage_receipt_detects_retained_writer_during_final_parent_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    destination = tmp_path / "retained-writer.json"
+    replacement = lineage._canonical_json_bytes({"value": 2})
+    real_seal = lineage._seal_publication_descriptor
+    real_parent_identity = lineage._publication_parent_identity
+    writer: int | None = None
+    parent_checks = 0
+    writer_denied = False
+
+    def seal_with_retained_writer(descriptor: int) -> None:
+        nonlocal writer, writer_denied
+        os.chmod(destination, 0o600)
+        try:
+            writer = os.open(destination, os.O_RDWR | getattr(os, "O_BINARY", 0))
+        except OSError:
+            if os.name != "nt":
+                raise
+            writer_denied = True
+        real_seal(descriptor)
+
+    def mutate_during_parent_check(path: Path) -> tuple[int, int]:
+        nonlocal parent_checks
+        identity = real_parent_identity(path)
+        parent_checks += 1
+        if parent_checks == 3 and writer is not None:
+            os.lseek(writer, 0, os.SEEK_SET)
+            assert os.write(writer, replacement) == len(replacement)
+            os.fsync(writer)
+        return identity
+
+    monkeypatch.setattr(
+        lineage, "_seal_publication_descriptor", seal_with_retained_writer
+    )
+    monkeypatch.setattr(
+        lineage, "_publication_parent_identity", mutate_during_parent_check
+    )
+    try:
+        if os.name == "nt":
+            _, digest, size = lineage._publish_canonical_json(destination, {"value": 1})
+            assert writer_denied
+            assert digest == hashlib.sha256(destination.read_bytes()).hexdigest()
+            assert size == destination.stat().st_size
+        else:
+            with pytest.raises(lineage.DatasetLineageError, match="changed during"):
+                lineage._publish_canonical_json(destination, {"value": 1})
+    finally:
+        if writer is not None:
+            os.close(writer)
+
+    if os.name == "nt":
+        assert destination.read_bytes() == lineage._canonical_json_bytes({"value": 1})
+    else:
+        assert destination.read_bytes() == replacement
+
+
+def test_publication_failure_never_deletes_a_foreign_replacement(
     case: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ):
-    real_link = os.link
+    destination = case["output"]
 
-    def link_then_replace(source: Path, destination: Path) -> None:
-        real_link(source, destination)
-        Path(destination).unlink()
-        Path(destination).write_bytes(b"foreign after link")
+    def replace_then_fail(*_args: Any, **_kwargs: Any):
+        os.chmod(destination, 0o600)
+        destination.unlink()
+        destination.write_bytes(b"foreign replacement")
+        raise lineage.DatasetLineageError("injected replacement")
 
-    monkeypatch.setattr(lineage.os, "link", link_then_replace)
-    with pytest.raises(
-        lineage.DatasetLineageError, match="refusing destructive rollback"
-    ):
+    monkeypatch.setattr(lineage, "_stable_lineage_receipt", replace_then_fail)
+    with pytest.raises(lineage.DatasetLineageError, match="injected replacement"):
         _build(case)
-    assert case["output"].read_bytes() == b"foreign after link"
-    assert not case["output"].with_name(case["output"].name + ".part").exists()
+
+    assert destination.read_bytes() == b"foreign replacement"
+
+
+def test_lineage_publication_rejects_hardlink_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    destination = tmp_path / "aliased.json"
+    alias = tmp_path / "alias.json"
+    real_seal = lineage._seal_publication_descriptor
+    calls = 0
+
+    def seal_then_alias(descriptor: int) -> None:
+        nonlocal calls
+        real_seal(descriptor)
+        calls += 1
+        if calls == 1:
+            os.link(destination, alias)
+
+    monkeypatch.setattr(lineage, "_seal_publication_descriptor", seal_then_alias)
+    with pytest.raises(lineage.DatasetLineageError, match="changed before"):
+        lineage._publish_canonical_json(destination, {"value": 1})
+
+    assert destination.samefile(alias)
+
+
+def test_lineage_publication_detects_parent_replacement_before_final_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    parent = tmp_path / "publication"
+    destination = parent / "lineage.json"
+    displaced = tmp_path / "publication-displaced"
+    real_receipt = lineage._stable_lineage_receipt
+
+    def replace_parent(*args: Any, **kwargs: Any):
+        parent.rename(displaced)
+        parent.mkdir()
+        return real_receipt(*args, **kwargs)
+
+    monkeypatch.setattr(lineage, "_stable_lineage_receipt", replace_parent)
+    with pytest.raises(lineage.DatasetLineageError, match="cannot verify"):
+        lineage._publish_canonical_json(destination, {"value": 1})
+
+    assert (displaced / destination.name).exists()
+    assert not destination.exists()
+
+
+def test_lineage_publication_rejects_a_symlinked_parent(tmp_path: Path):
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    try:
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+
+    with pytest.raises(lineage.DatasetLineageError, match="must (not|be a real)"):
+        lineage._publish_canonical_json(linked_parent / "lineage.json", {"value": 1})
+
+    assert not (real_parent / "lineage.json").exists()
+
+
+def test_lineage_publication_does_not_create_through_a_linked_ancestor(
+    tmp_path: Path,
+):
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    linked_ancestor = tmp_path / "linked-ancestor"
+    try:
+        linked_ancestor.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable")
+
+    with pytest.raises(lineage.DatasetLineageError, match="ancestor.*(real|link)"):
+        lineage._publish_canonical_json(
+            linked_ancestor / "missing" / "lineage.json", {"value": 1}
+        )
+
+    assert not (real_parent / "missing").exists()
 
 
 def test_cli_requires_external_hash_and_commit_pins():

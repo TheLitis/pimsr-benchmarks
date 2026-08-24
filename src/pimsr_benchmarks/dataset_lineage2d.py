@@ -6,10 +6,10 @@ dataset, its ordered source shards and logs, and the clean source repositories
 whose identities are supplied by the caller.  It then proves, by chunked exact
 comparison, that the merged logical HDF5 arrays equal the ordered shard data.
 
-The resulting evidence deliberately has the narrower scope
-``artifact_lineage_and_source_identity_without_forward_regeneration``.  A
-matching artifact and clean source tree are not proof that those exact sources
-were executing when the artifacts were originally generated.
+The resulting evidence deliberately binds artifact lineage and transitive
+generator source identity without forward regeneration.  A matching artifact
+and clean source tree are not proof that those exact sources were executing
+when the artifacts were originally generated.
 """
 
 from __future__ import annotations
@@ -21,14 +21,24 @@ import os
 import re
 import stat
 import subprocess
-from collections.abc import Iterator
+import sys
+from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, BinaryIO
 
 import h5py
 import numpy as np
+
+from ._publication_io import (
+    close_publication_descriptor,
+    ensure_real_directory,
+    open_exclusive_publication,
+    open_verified_publication,
+    set_publication_descriptor_read_only,
+)
 
 LINEAGE_SCHEMA = "pimsr-public-dataset-lineage-2d"
 LINEAGE_SCHEMA_VERSION = 2
@@ -172,7 +182,17 @@ class DatasetLineageResult:
     path: Path
     sha256: str
     size_bytes: int
-    manifest: dict[str, object]
+    manifest: Mapping[str, object]
+
+
+def _freeze_manifest(value: object) -> object:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _freeze_manifest(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_manifest(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -1094,75 +1114,215 @@ def _path_exists(path: Path) -> bool:
     return os.path.lexists(path)
 
 
-def _remove_ours(path: Path, signature: tuple[int, int, int, int]) -> bool:
-    if not _path_exists(path):
-        return True
+def _publication_parent_identity(path: Path) -> tuple[int, int]:
     try:
-        current = path.lstat()
-    except OSError:
-        return False
-    if _file_signature(current) != signature or not stat.S_ISREG(current.st_mode):
-        return False
+        info = os.lstat(path)
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise DatasetLineageError(
+            f"cannot inspect lineage output parent {path}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise DatasetLineageError(
+            f"lineage output parent must be a real directory: {path}"
+        )
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(path.absolute())):
+        raise DatasetLineageError(
+            f"lineage output parent must not traverse a symbolic link: {path}"
+        )
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _write_all_descriptor(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("zero-byte write while publishing lineage")
+        view = view[written:]
+
+
+def _read_all_descriptor(descriptor: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 1024 * 1024):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _publication_signature(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+    )
+
+
+def _seal_publication_descriptor(descriptor: int) -> None:
+    set_publication_descriptor_read_only(descriptor)
+    os.fsync(descriptor)
+
+
+def _verify_new_lineage_path(
+    destination: Path,
+    *,
+    expected_identity: tuple[int, int],
+    expected_parent_identity: tuple[int, int],
+) -> None:
     try:
-        path.unlink()
-    except OSError:
-        return False
-    return True
+        current = os.lstat(destination)
+    except OSError as exc:
+        raise DatasetLineageError(
+            f"new lineage output disappeared before writing: {destination}"
+        ) from exc
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or (int(current.st_dev), int(current.st_ino)) != expected_identity
+        or int(current.st_nlink) != 1
+    ):
+        raise DatasetLineageError(
+            "new lineage path was replaced or acquired a hardlink alias"
+        )
+    if _publication_parent_identity(destination.parent) != expected_parent_identity:
+        raise DatasetLineageError("lineage output parent was replaced before writing")
+
+
+def _stable_lineage_receipt(
+    destination: Path,
+    *,
+    expected_identity: tuple[int, int],
+    expected_parent_identity: tuple[int, int],
+    expected_payload: bytes,
+) -> tuple[Path, str, int]:
+    descriptor: int | None = None
+    try:
+        preopen = os.lstat(destination)
+        if not stat.S_ISREG(preopen.st_mode) or stat.S_ISLNK(preopen.st_mode):
+            raise DatasetLineageError(
+                f"published lineage is not a regular non-link file: {destination}"
+            )
+        descriptor = open_verified_publication(destination)
+        presealed = os.fstat(descriptor)
+        if (int(presealed.st_dev), int(presealed.st_ino)) != expected_identity or int(
+            presealed.st_nlink
+        ) != 1:
+            raise DatasetLineageError(
+                "published lineage was replaced or acquired a hardlink alias"
+            )
+        set_publication_descriptor_read_only(descriptor)
+        before = os.lstat(destination)
+        opened = os.fstat(descriptor)
+        if stat.S_IMODE(opened.st_mode) & 0o222:
+            raise DatasetLineageError("published lineage is not sealed read-only")
+        first = _read_all_descriptor(descriptor)
+        middle = os.fstat(descriptor)
+        if _publication_parent_identity(destination.parent) != expected_parent_identity:
+            raise DatasetLineageError("lineage output parent was replaced")
+        second = _read_all_descriptor(descriptor)
+        after_fd = os.fstat(descriptor)
+        after_path = os.lstat(destination)
+        signatures = {
+            _publication_signature(value)
+            for value in (before, opened, middle, after_fd, after_path)
+        }
+        if (
+            len(signatures) != 1
+            or first != second
+            or second != expected_payload
+            or len(second) != int(opened.st_size)
+        ):
+            raise DatasetLineageError(
+                "published lineage changed during final descriptor verification"
+            )
+        return destination, hashlib.sha256(second).hexdigest(), len(second)
+    except DatasetLineageError:
+        raise
+    except OSError as exc:
+        raise DatasetLineageError(
+            f"cannot verify published lineage {destination}: {exc}"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            suppress_close_error = sys.exception() is not None
+            if suppress_close_error:
+                try:
+                    set_publication_descriptor_read_only(descriptor)
+                except OSError:
+                    pass
+            close_publication_descriptor(descriptor, suppress_errors=suppress_close_error)
 
 
 def _publish_canonical_json(
     path: str | Path, manifest: dict[str, object]
 ) -> tuple[Path, str, int]:
-    destination = Path(path).absolute()
+    """Exclusively create, seal, and descriptor-verify canonical lineage JSON.
+
+    There is deliberately no pathname rollback: after exclusive creation an
+    interrupted artifact is retained read-only instead of risking deletion of
+    a concurrent replacement.
+    """
+    destination = Path(os.path.abspath(path))
     parent = destination.parent
-    if parent.is_symlink():
-        raise ValueError("lineage output parent must not be a symbolic link")
-    parent.mkdir(parents=True, exist_ok=True)
-    if not parent.is_dir():
-        raise ValueError("lineage output parent must be a directory")
-    partial = destination.with_name(destination.name + ".part")
+    ensure_real_directory(
+        parent,
+        error_type=DatasetLineageError,
+        role="lineage output parent",
+    )
+    parent_identity = _publication_parent_identity(parent)
     if _path_exists(destination):
         raise FileExistsError(f"refusing to overwrite lineage output: {destination}")
-    if _path_exists(partial):
-        raise FileExistsError(f"refusing to overwrite stale lineage partial: {partial}")
     payload = _canonical_json_bytes(manifest)
-    digest = hashlib.sha256(payload).hexdigest()
-    partial_signature: tuple[int, int, int, int] | None = None
+    descriptor: int | None = None
+    identity: tuple[int, int] | None = None
     try:
-        with partial.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        partial_signature = _file_signature(partial.lstat())
         try:
-            os.link(partial, destination)
+            descriptor = open_exclusive_publication(destination)
         except FileExistsError as exc:
             raise FileExistsError(
                 f"lineage publication race at destination: {destination}"
             ) from exc
-        destination_signature = _file_signature(destination.lstat())
-        if destination_signature != partial_signature:
-            raise DatasetLineageError(
-                "lineage destination was replaced during publication"
-            )
-        partial.unlink()
-        final = _snapshot_file(destination, role="published lineage")
-        if final.sha256 != digest or final.size_bytes != len(payload):
-            raise DatasetLineageError(
-                "published lineage identity is not the canonical payload"
-            )
-        return destination, digest, len(payload)
-    except BaseException as exc:
-        replacement = False
-        if partial_signature is not None:
-            if not _remove_ours(destination, partial_signature):
-                replacement = _path_exists(destination)
-            _remove_ours(partial, partial_signature)
-        if replacement:
-            raise DatasetLineageError(
-                "lineage destination was replaced; refusing destructive rollback"
-            ) from exc
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or int(opened.st_nlink) != 1:
+            raise DatasetLineageError("new lineage output is not a unique regular file")
+        identity = int(opened.st_dev), int(opened.st_ino)
+        _verify_new_lineage_path(
+            destination,
+            expected_identity=identity,
+            expected_parent_identity=parent_identity,
+        )
+        _write_all_descriptor(descriptor, payload)
+        os.fsync(descriptor)
+        _seal_publication_descriptor(descriptor)
+        sealed = os.fstat(descriptor)
+        if (
+            (int(sealed.st_dev), int(sealed.st_ino)) != identity
+            or int(sealed.st_nlink) != 1
+            or int(sealed.st_size) != len(payload)
+        ):
+            raise DatasetLineageError("lineage output changed before final verification")
+    except BaseException:
+        if descriptor is not None:
+            try:
+                _seal_publication_descriptor(descriptor)
+            except OSError:
+                pass
         raise
+    finally:
+        if descriptor is not None:
+            close_publication_descriptor(
+                descriptor, suppress_errors=sys.exception() is not None
+            )
+    assert identity is not None
+    return _stable_lineage_receipt(
+        destination,
+        expected_identity=identity,
+        expected_parent_identity=parent_identity,
+        expected_payload=payload,
+    )
 
 
 def build_dataset_lineage_2d(
@@ -1368,7 +1528,9 @@ def build_dataset_lineage_2d(
         },
     }
     published_path, digest, size = _publish_canonical_json(output_path, manifest)
-    return DatasetLineageResult(published_path, digest, size, manifest)
+    frozen_manifest = _freeze_manifest(manifest)
+    assert isinstance(frozen_manifest, Mapping)
+    return DatasetLineageResult(published_path, digest, size, frozen_manifest)
 
 
 def _parser() -> argparse.ArgumentParser:
