@@ -1,19 +1,23 @@
 """Fail-closed common-retraining adapter for the pinned MTDLPy DinkNet50.
 
-The adapter deliberately accepts held-out observations only through the
-observation-only payload emitted by :mod:`dataset2d_materialization`.  Test
-truth therefore cannot enter the process that constructs or trains the model.
+Training and inference are deliberately separate operations.  A training run
+can see only the public train/validation datasets and the fixed ImageNet
+initialization.  Each held-out campaign is then inferred from the same
+immutable seed checkpoint through the observation-only payload emitted by
+:mod:`dataset2d_materialization`.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import importlib.util
 import io
 import json
 import os
 import platform
 import random
+import re
 import ssl
 import stat
 import subprocess
@@ -23,6 +27,7 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -34,22 +39,15 @@ from pimsr_benchmarks.dataset2d_materialization import (
     OBSERVATION_SCHEMA,
     PAYLOAD_SCHEMA_VERSION,
 )
-from pimsr_benchmarks.runner2d import (
-    file_artifact_provenance,
-    require_file_artifact_unchanged,
-)
+from pimsr_benchmarks.runner2d import require_file_artifact_unchanged
 
 MTDLPY_REPOSITORY_URL = "https://github.com/Yuan-Chongxin/MTDLPy.git"
 MTDLPY_COMMIT = "b01f72a53078a9dc8d452fa53ea5009639d00b04"
 MTDLPY_DINKNET_PATH = "func/dinknet.py"
 MTDLPY_DINKNET_GIT_BLOB = "5551d6b598f9934db4d4beb17f475c6da36b4a53"
-MTDLPY_DINKNET_SHA256 = (
-    "838d1271c6987fdac05daf53f2408827d86d493f1fa2ec73a6ecd4753d42ebae"
-)
+MTDLPY_DINKNET_SHA256 = "838d1271c6987fdac05daf53f2408827d86d493f1fa2ec73a6ecd4753d42ebae"
 
-IMAGENET_RESNET50_V1_URL = (
-    "https://download.pytorch.org/models/resnet50-0676ba61.pth"
-)
+IMAGENET_RESNET50_V1_URL = "https://download.pytorch.org/models/resnet50-0676ba61.pth"
 IMAGENET_RESNET50_V1_SHA256 = (
     "0676ba61b6795bbe1773cffd859882e5e297624d384b6993f7c9e683e722fb8a"
 )
@@ -98,8 +96,7 @@ UPSTREAM_CONFIG_RECIPE = TrainingRecipe(
     ),
 )
 TRAINING_RECIPES = {
-    recipe.recipe_id: recipe
-    for recipe in (REVIEWED_RECIPE, UPSTREAM_CONFIG_RECIPE)
+    recipe.recipe_id: recipe for recipe in (REVIEWED_RECIPE, UPSTREAM_CONFIG_RECIPE)
 }
 DEFAULT_RECIPE_ID = REVIEWED_RECIPE.recipe_id
 
@@ -121,9 +118,57 @@ PREDICTION_KEYS = (
     "predicted_log10_resistivity",
 )
 RUNTIME_SCHEMA = "pimsr-mtdlpy-common-retrain-runtime"
-RUNTIME_SCHEMA_VERSION = 1
+RUNTIME_SCHEMA_VERSION = 2
+TRAINING_RUNTIME_SCHEMA = "pimsr-mtdlpy-common-retrain-training-runtime"
+TRAINING_RUNTIME_SCHEMA_VERSION = 1
 CHECKPOINT_SCHEMA = "pimsr-mtdlpy-common-retrain-checkpoint"
 CHECKPOINT_SCHEMA_VERSION = 1
+DEPENDENCY_CLOSURE_SCHEMA = "pimsr-mtdlpy-dependency-closure"
+DEPENDENCY_CLOSURE_SCHEMA_VERSION = 3
+MAX_CHECKPOINT_SIZE_BYTES = 1024 * 1024 * 1024
+
+_COMMON_BACKEND_RUNTIME_KEYS = frozenset(
+    {
+        "python",
+        "platform",
+        "torch",
+        "torchvision",
+        "torch_cuda_build",
+        "cuda_available",
+        "device",
+        "cuda_device_name",
+        "peak_cuda_memory_bytes",
+        "preprocessing_wall_time_s",
+        "model_initialization_wall_time_s",
+        "backend_wall_time_s",
+    }
+)
+_TRAINING_BACKEND_RUNTIME_KEYS = _COMMON_BACKEND_RUNTIME_KEYS | {"training_wall_time_s"}
+_INFERENCE_BACKEND_RUNTIME_KEYS = _COMMON_BACKEND_RUNTIME_KEYS | {"inference_wall_time_s"}
+
+CHECKPOINT_KEYS = frozenset(
+    {
+        "checkpoint_schema",
+        "checkpoint_schema_version",
+        "method",
+        "track",
+        "seed",
+        "recipe_id",
+        "model_state",
+        "training_config",
+        "preprocessing",
+        "training_summary",
+        "training_runtime",
+        "source",
+        "imagenet_weights",
+        "dataset_identities",
+        "training_geometry",
+        "dependency_closure",
+        "truth_keys_accepted",
+        "contains_truth",
+        "contains_observation_campaign",
+    }
+)
 
 _OBSERVATION_VALUE_KEYS = (
     "observed_log10_rho_te",
@@ -159,9 +204,7 @@ class MTDLPyAdapterError(RuntimeError):
 def training_recipe(recipe_id: str) -> TrainingRecipe:
     """Resolve one closed-set recipe id without accepting free hyperparameters."""
     if not isinstance(recipe_id, str) or recipe_id not in TRAINING_RECIPES:
-        raise ValueError(
-            f"recipe_id must be one of {tuple(sorted(TRAINING_RECIPES))}"
-        )
+        raise ValueError(f"recipe_id must be one of {tuple(sorted(TRAINING_RECIPES))}")
     return TRAINING_RECIPES[recipe_id]
 
 
@@ -199,9 +242,136 @@ class TrainingOutcome:
     """Backend result before immutable publication."""
 
     state_dict: Mapping[str, Any]
-    predicted_log10_resistivity: np.ndarray
     training_summary: Mapping[str, object]
     runtime: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class InferenceOutcome:
+    """Truth-free backend inference result before immutable publication."""
+
+    predicted_log10_resistivity: np.ndarray
+    runtime: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class _ArtifactSnapshot:
+    path: Path
+    payload: bytes
+    sha256: str
+    device: int
+    inode: int
+
+    @property
+    def size_bytes(self) -> int:
+        return len(self.payload)
+
+
+def _path_is_link(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction()) if callable(is_junction) else False
+
+
+def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+    )
+
+
+def _snapshot_regular_file(
+    path: str | Path,
+    *,
+    role: str,
+    expected_sha256: str | None = None,
+    max_size_bytes: int | None = None,
+) -> _ArtifactSnapshot:
+    requested = Path(os.path.abspath(os.fspath(path)))
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise MTDLPyAdapterError(
+            f"expected {role} SHA-256 must be 64 lowercase hexadecimal characters"
+        )
+    try:
+        path_before = requested.lstat()
+    except OSError as exc:
+        raise MTDLPyAdapterError(f"cannot inspect {role}: {requested}") from exc
+    if _path_is_link(requested):
+        raise MTDLPyAdapterError(f"{role} must be a non-symlink regular file")
+    if not stat.S_ISREG(path_before.st_mode):
+        raise MTDLPyAdapterError(f"{role} must be a regular file")
+    if max_size_bytes is not None and int(path_before.st_size) > max_size_bytes:
+        raise MTDLPyAdapterError(f"{role} exceeds the fail-closed size limit")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(requested, flags)
+    except OSError as exc:
+        raise MTDLPyAdapterError(f"cannot open {role} without following links") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise MTDLPyAdapterError(f"{role} must be a regular file")
+        if _stat_identity(path_before) != _stat_identity(opened):
+            raise MTDLPyAdapterError(f"{role} changed before it was opened")
+        if max_size_bytes is not None and int(opened.st_size) > max_size_bytes:
+            raise MTDLPyAdapterError(f"{role} exceeds the fail-closed size limit")
+        try:
+            resolved = requested.resolve(strict=True)
+            resolved_info = resolved.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise MTDLPyAdapterError(f"cannot resolve opened {role}") from exc
+        if _path_is_link(resolved) or _stat_identity(resolved_info) != _stat_identity(
+            opened
+        ):
+            raise MTDLPyAdapterError(f"{role} path does not identify the opened file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 8 * 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+        after_descriptor = os.fstat(descriptor)
+        try:
+            path_after = requested.lstat()
+        except OSError as exc:
+            raise MTDLPyAdapterError(
+                f"{role} path disappeared while it was read"
+            ) from exc
+        if (
+            _path_is_link(requested)
+            or _stat_identity(opened) != _stat_identity(after_descriptor)
+            or _stat_identity(opened) != _stat_identity(path_after)
+            or len(payload) != int(opened.st_size)
+        ):
+            raise MTDLPyAdapterError(f"{role} changed while it was read")
+    finally:
+        os.close(descriptor)
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise MTDLPyAdapterError(f"{role} SHA-256 differs from the pinned digest")
+    return _ArtifactSnapshot(
+        path=resolved,
+        payload=payload,
+        sha256=digest,
+        device=int(opened.st_dev),
+        inode=int(opened.st_ino),
+    )
+
+
+def _snapshot_core(snapshot: _ArtifactSnapshot) -> dict[str, object]:
+    return {
+        "path": str(snapshot.path),
+        "sha256": snapshot.sha256,
+        "size_bytes": snapshot.size_bytes,
+    }
 
 
 def _artifact_core(value: Mapping[str, object]) -> dict[str, object]:
@@ -260,18 +430,14 @@ def verify_pinned_repository(path: str | Path) -> dict[str, object]:
             "MTDLPy origin URL must be exactly "
             f"{MTDLPY_REPOSITORY_URL!r}, got {remotes!r}"
         )
-    status = str(
-        _run_git(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    )
+    status = str(_run_git(repo, "status", "--porcelain=v1", "--untracked-files=all"))
     if status:
         raise MTDLPyAdapterError("MTDLPy repository must have a clean worktree")
 
     tree_entry = str(
         _run_git(repo, "ls-tree", "--full-tree", "HEAD", "--", MTDLPY_DINKNET_PATH)
     )
-    expected_entry = (
-        f"100644 blob {MTDLPY_DINKNET_GIT_BLOB}\t{MTDLPY_DINKNET_PATH}"
-    )
+    expected_entry = f"100644 blob {MTDLPY_DINKNET_GIT_BLOB}\t{MTDLPY_DINKNET_PATH}"
     if tree_entry != expected_entry:
         raise MTDLPyAdapterError(
             "pinned MTDLPy DinkNet source tree entry is not the reviewed blob"
@@ -289,7 +455,13 @@ def verify_pinned_repository(path: str | Path) -> dict[str, object]:
         raise MTDLPyAdapterError("pinned MTDLPy DinkNet Git blob SHA-256 changed")
 
     source = repo / MTDLPY_DINKNET_PATH
-    source_identity = file_artifact_provenance(source)
+    source_identity = _snapshot_core(
+        _snapshot_regular_file(
+            source,
+            role="pinned MTDLPy DinkNet source",
+            expected_sha256=MTDLPY_DINKNET_SHA256,
+        )
+    )
     if source_identity["sha256"] != MTDLPY_DINKNET_SHA256:
         raise MTDLPyAdapterError(
             "checked-out MTDLPy DinkNet source bytes differ from the reviewed blob"
@@ -314,11 +486,13 @@ def validate_local_imagenet_weights(
         raise MTDLPyAdapterError(
             "declared ImageNet weights SHA-256 is not the preregistered ResNet50 V1 hash"
         )
-    identity = file_artifact_provenance(path)
-    if identity["sha256"] != declared_sha256:
-        raise MTDLPyAdapterError(
-            "local ImageNet weights do not match the declared SHA-256"
+    identity = _snapshot_core(
+        _snapshot_regular_file(
+            path,
+            role="local ImageNet weights",
+            expected_sha256=declared_sha256,
         )
+    )
     return {
         **identity,
         "source_url": IMAGENET_RESNET50_V1_URL,
@@ -329,7 +503,9 @@ def validate_local_imagenet_weights(
 def _axis(values: np.ndarray, *, name: str, positive: bool = False) -> np.ndarray:
     result = np.asarray(values)
     if result.dtype != np.dtype("<f8") or result.ndim != 1 or result.size == 0:
-        raise MTDLPyAdapterError(f"{name} must be a non-empty little-endian float64 vector")
+        raise MTDLPyAdapterError(
+            f"{name} must be a non-empty little-endian float64 vector"
+        )
     if not np.isfinite(result).all() or np.any(np.diff(result) <= 0):
         raise MTDLPyAdapterError(f"{name} must be finite and strictly increasing")
     if positive and np.any(result <= 0):
@@ -359,25 +535,27 @@ def _require_geometry_shape(
 
 def load_training_split(path: str | Path, *, role: str) -> TrainingSplit:
     """Load train/validation truth only after the complete producer validation."""
-    artifact = file_artifact_provenance(path)
-    artifact_path = Path(str(artifact["path"]))
+    snapshot = _snapshot_regular_file(path, role=role)
+    artifact = _snapshot_core(snapshot)
     from pimsr_inversion.contracts2d import validate_dataset2d
 
-    with h5py.File(artifact_path, "r") as h5:
-        contract = validate_dataset2d(h5)
-        generator_seed = int(np.asarray(h5.attrs["generator_seed"]).item())
-        observations = np.stack(
-            [
-                h5["obs_mt_log10_rho"][:],
-                h5["obs_mt_phase"][:],
-                h5["obs_mt_log10_rho_tm"][:],
-                h5["obs_mt_phase_tm"][:],
-            ],
-            axis=1,
-        ).astype(np.float32, copy=False)
-        targets = np.asarray(h5["target_log10_res"][:], dtype=np.float32)
-        sample_index = np.asarray(h5["sample_index"][:], dtype=np.int64)
-    require_file_artifact_unchanged(artifact, role=role)
+    try:
+        with h5py.File(io.BytesIO(snapshot.payload), "r") as h5:
+            contract = validate_dataset2d(h5)
+            generator_seed = int(np.asarray(h5.attrs["generator_seed"]).item())
+            observations = np.stack(
+                [
+                    h5["obs_mt_log10_rho"][:],
+                    h5["obs_mt_phase"][:],
+                    h5["obs_mt_log10_rho_tm"][:],
+                    h5["obs_mt_phase_tm"][:],
+                ],
+                axis=1,
+            ).astype(np.float32, copy=False)
+            targets = np.asarray(h5["target_log10_res"][:], dtype=np.float32)
+            sample_index = np.asarray(h5["sample_index"][:], dtype=np.int64)
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise MTDLPyAdapterError(f"cannot load {role} from pinned bytes: {exc}") from exc
 
     frequencies = np.asarray(contract.frequencies, dtype="<f8")
     station_x = np.asarray(contract.station_x, dtype="<f8")
@@ -415,9 +593,9 @@ def _scalar_string(value: np.ndarray, name: str) -> str:
     return str(value.item())
 
 
-def _check_npz_member_names(path: Path) -> None:
+def _check_npz_member_names(payload: bytes, *, path: Path) -> None:
     try:
-        with zipfile.ZipFile(path, "r") as archive:
+        with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
             names = archive.namelist()
     except (OSError, zipfile.BadZipFile) as exc:
         raise MTDLPyAdapterError(f"invalid observation NPZ: {path}") from exc
@@ -430,11 +608,12 @@ def _check_npz_member_names(path: Path) -> None:
 
 def load_heldout_observations(path: str | Path) -> HeldoutObservations:
     """Parse the exact truth-free NPZ contract without guessing missing fields."""
-    artifact = file_artifact_provenance(path)
-    artifact_path = Path(str(artifact["path"]))
-    _check_npz_member_names(artifact_path)
+    snapshot = _snapshot_regular_file(path, role="held-out observation payload")
+    artifact = _snapshot_core(snapshot)
+    artifact_path = snapshot.path
+    _check_npz_member_names(snapshot.payload, path=artifact_path)
     try:
-        with np.load(artifact_path, allow_pickle=False) as payload:
+        with np.load(io.BytesIO(snapshot.payload), allow_pickle=False) as payload:
             if tuple(payload.files) != _OBSERVATION_KEYS:
                 raise MTDLPyAdapterError(
                     "observation NPZ keys are not in the canonical contract order"
@@ -442,8 +621,6 @@ def load_heldout_observations(path: str | Path) -> HeldoutObservations:
             arrays = {name: np.asarray(payload[name]).copy() for name in payload.files}
     except (OSError, ValueError) as exc:
         raise MTDLPyAdapterError(f"cannot load observation NPZ: {artifact_path}") from exc
-    require_file_artifact_unchanged(artifact, role="held-out observation payload")
-
     if _scalar_string(arrays["schema"], "schema") != OBSERVATION_SCHEMA:
         raise MTDLPyAdapterError("unsupported held-out observation schema")
     schema_version = arrays["schema_version"]
@@ -455,8 +632,10 @@ def load_heldout_observations(path: str | Path) -> HeldoutObservations:
         raise MTDLPyAdapterError("unsupported held-out observation schema version")
 
     order = arrays["observation_channel_order"]
-    if order.dtype.kind != "U" or order.shape != (4,) or tuple(order.tolist()) != (
-        OBSERVATION_CHANNEL_ORDER
+    if (
+        order.dtype.kind != "U"
+        or order.shape != (4,)
+        or tuple(order.tolist()) != (OBSERVATION_CHANNEL_ORDER)
     ):
         raise MTDLPyAdapterError("held-out observation channel order is not canonical")
 
@@ -541,7 +720,9 @@ def resize_bilinear_half_pixel(
     if array.ndim < 2 or array.shape[-2] < 1 or array.shape[-1] < 1:
         raise ValueError("resize input must have two non-empty spatial dimensions")
     if not np.isfinite(array).all():
-        raise ValueError("resize input must be finite; missing values are not interpolated")
+        raise ValueError(
+            "resize input must be finite; missing values are not interpolated"
+        )
     out_h, out_w = output_shape
     if out_h < 1 or out_w < 1:
         raise ValueError("resize output dimensions must be positive")
@@ -638,20 +819,207 @@ def _require_same_geometry(
             raise MTDLPyAdapterError(f"{where} have different {name} axes")
 
 
-def _require_disjoint_samples(
+def _require_training_disjoint(
     train: TrainingSplit,
     validation: TrainingSplit,
-    test: HeldoutObservations,
 ) -> None:
-    if train.generator_seed == validation.generator_seed and np.intersect1d(
-        train.sample_index, validation.sample_index
-    ).size:
+    if (
+        train.generator_seed == validation.generator_seed
+        and np.intersect1d(train.sample_index, validation.sample_index).size
+    ):
         raise MTDLPyAdapterError(
             "train and validation (generator_seed, sample_index) identities overlap"
         )
-    identities = [entry.provenance["sha256"] for entry in (train, validation, test)]
-    if len(set(identities)) != len(identities):
-        raise MTDLPyAdapterError("train, validation and held-out artifacts must differ")
+    identities = [entry.provenance["sha256"] for entry in (train, validation)]
+    if len(set(identities)) != 2:
+        raise MTDLPyAdapterError("train and validation artifacts must differ")
+
+
+def _training_config(seed: int, recipe: TrainingRecipe) -> dict[str, object]:
+    return {
+        "campaign_seeds": list(COMMON_RETRAIN_SEEDS),
+        "recipe_id": recipe.recipe_id,
+        "seed": seed,
+        "epochs": recipe.epochs,
+        "batch_size": recipe.batch_size,
+        "optimizer": {
+            "name": "Adam",
+            "learning_rate": recipe.learning_rate,
+            "betas": list(ADAM_BETAS),
+            "eps": ADAM_EPS,
+            "weight_decay": WEIGHT_DECAY,
+        },
+        "scheduler": None,
+        "early_stopping": None,
+        "gradient_clip_max_norm": GRAD_CLIP_NORM,
+        "loss": "mean_squared_error_mean",
+        "checkpoint_selection": "lowest validation MSE; strict less-than; first tie",
+        "normalization": "none",
+        "schedule_origin": recipe.schedule_origin,
+    }
+
+
+def _preprocessing_contract() -> dict[str, object]:
+    return {
+        "input_channel_order": list(OBSERVATION_CHANNEL_ORDER),
+        "observation_axis_order": ["sample", "channel", "frequency", "station"],
+        "network_spatial_axis_order": ["station_resampled", "frequency_resampled"],
+        "transpose_observations": True,
+        "observation_transform_order": {
+            "apparent_resistivity": (
+                "pow10_to_linear_then_bilinear_resize_then_log10_then_transpose"
+            ),
+            "phase": "bilinear_resize_then_transpose",
+        },
+        "input_units": ["log10_ohm_m", "degree", "log10_ohm_m", "degree"],
+        "observation_resize": "8x12_to_32x32",
+        "observation_resize_origin": (
+            "benchmark-native geometry adaptation preserving upstream transform order"
+        ),
+        "training_target_resize": ("pow10_to_linear_then_64x48_to_32x32_then_log10"),
+        "training_target_axis_order": ["sample", "depth", "x"],
+        "prediction_resize": "pow10_to_linear_then_32x32_to_64x48_then_log10",
+        "prediction_resize_origin": (
+            "benchmark-native evaluation-grid adaptation; upstream does not define "
+            "this inverse regridding"
+        ),
+        "interpolation": {
+            "kind": "bilinear",
+            "coordinate_transform": "half_pixel",
+            "boundary": "clamp_to_edge",
+            "implementation": "pimsr_benchmarks.mtdlpy.resize_bilinear_half_pixel",
+            "dtype": "float64_accumulation_float32_output",
+            "antialias": False,
+        },
+        "missing_data_policy": "reject_if_valid_mask_is_not_all_true",
+        "phase_domain_adaptation": (
+            "retain benchmark canonical [0,180) phases; do not apply the upstream "
+            "loader's [0,90] sample rejection"
+        ),
+        "upstream_pipeline_claim": "semantic preprocessing order only, not byte-exact",
+        "test_tuning": False,
+        "evaluation_floors_used_as_model_input": False,
+    }
+
+
+def _module_source_artifact(module_name: str) -> dict[str, object]:
+    module = sys.modules.get(module_name)
+    if module is None:
+        module = __import__(module_name, fromlist=["__name__"])
+    source = getattr(module, "__file__", None)
+    if not isinstance(source, str):
+        raise MTDLPyAdapterError(f"cannot identify source for dependency {module_name}")
+    path = Path(source)
+    if path.suffix == ".pyc":
+        path = path.with_suffix(".py")
+    return _snapshot_core(
+        _snapshot_regular_file(path, role=f"dependency source {module_name}")
+    )
+
+
+def _benchmark_runner_source_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "scripts" / "run_mtdlpy_common.py"
+
+
+def _validated_runner_source_artifact(path: str | Path) -> dict[str, object]:
+    snapshot = _snapshot_regular_file(path, role="MTDLPy CLI runner source")
+    try:
+        expected = _benchmark_runner_source_path().resolve(strict=True)
+    except OSError as exc:
+        raise MTDLPyAdapterError(
+            "cannot identify benchmark scripts/run_mtdlpy_common.py"
+        ) from exc
+    if snapshot.path != expected:
+        raise MTDLPyAdapterError(
+            "runner_source must be the exact benchmark scripts/run_mtdlpy_common.py"
+        )
+    expected_info = expected.stat(follow_symlinks=False)
+    if (snapshot.device, snapshot.inode) != (
+        int(expected_info.st_dev),
+        int(expected_info.st_ino),
+    ):
+        raise MTDLPyAdapterError(
+            "runner_source identity changed during dependency closure capture"
+        )
+    return _snapshot_core(snapshot)
+
+
+def _dependency_closure(
+    *,
+    repository: Mapping[str, object],
+    weights: Mapping[str, object],
+    runner_source: str | Path | None,
+) -> dict[str, object]:
+    cli_entrypoint_source_included = runner_source is not None
+    local_sources: dict[str, Mapping[str, object]] = {
+        "adapter": _snapshot_core(
+            _snapshot_regular_file(__file__, role="MTDLPy adapter source")
+        ),
+        "dataset2d_materialization": _module_source_artifact(
+            "pimsr_benchmarks.dataset2d_materialization"
+        ),
+        "runner2d": _module_source_artifact("pimsr_benchmarks.runner2d"),
+        "pimsr_inversion_contracts2d": _module_source_artifact(
+            "pimsr_inversion.contracts2d"
+        ),
+        "upstream_dinknet": repository["dinknet_source"],
+    }
+    if runner_source is not None:
+        local_sources["cli_runner"] = _validated_runner_source_artifact(runner_source)
+    packages: dict[str, str] = {}
+    for distribution in ("h5py", "numpy", "torch", "torchvision", "pimsr-inversion"):
+        try:
+            packages[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise MTDLPyAdapterError(
+                f"required dependency distribution is missing: {distribution}"
+            ) from exc
+    return {
+        "schema": DEPENDENCY_CLOSURE_SCHEMA,
+        "schema_version": DEPENDENCY_CLOSURE_SCHEMA_VERSION,
+        "evidence_scope": (
+            "direct_python_source_artifacts_and_distribution_version_strings"
+        ),
+        "python": platform.python_version(),
+        "packages": packages,
+        "local_source_artifacts": {
+            key: dict(value) for key, value in local_sources.items()
+        },
+        "fixed_imagenet_weights": dict(weights),
+        "cli_entrypoint_source_included": cli_entrypoint_source_included,
+        "required_local_python_source_artifacts_recorded": (
+            cli_entrypoint_source_included
+        ),
+        "native_binary_environment_complete": False,
+    }
+
+
+def _canonical_object_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _strict_metadata_equal(actual: object, expected: object) -> bool:
+    """Compare JSON-like evidence without Python's bool/int/float coercions."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, Mapping):
+        return set(actual) == set(expected) and all(
+            _strict_metadata_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, (list, tuple)):
+        return len(actual) == len(expected) and all(
+            _strict_metadata_equal(left, right)
+            for left, right in zip(actual, expected, strict=True)
+        )
+    return bool(actual == expected)
 
 
 def _configure_determinism(torch: Any, seed: int) -> None:
@@ -683,12 +1051,18 @@ def _load_upstream_model(
             "torchvision is required to instantiate pinned MTDLPy DinkNet50"
         ) from exc
 
-    weight_path = Path(str(weights["path"]))
-    weight_bytes = weight_path.read_bytes()
-    require_file_artifact_unchanged(
-        _artifact_core(weights), role="local ImageNet weights"
+    weight_snapshot = _snapshot_regular_file(
+        str(weights["path"]),
+        role="local ImageNet weights",
+        expected_sha256=str(weights["sha256"]),
     )
-    state = torch.load(io.BytesIO(weight_bytes), map_location="cpu", weights_only=True)
+    if _snapshot_core(weight_snapshot) != _artifact_core(weights):
+        raise MTDLPyAdapterError(
+            "local ImageNet weights identity differs from the validated artifact"
+        )
+    state = torch.load(
+        io.BytesIO(weight_snapshot.payload), map_location="cpu", weights_only=True
+    )
     if not isinstance(state, Mapping):
         raise MTDLPyAdapterError("ImageNet weights root must be a plain state dictionary")
 
@@ -700,17 +1074,41 @@ def _load_upstream_model(
             "local ImageNet artifact is not an exact torchvision ResNet50 state dict"
         ) from exc
 
-    source_path = Path(str(repository["dinknet_source"]["path"]))
-    spec = importlib.util.spec_from_file_location("_pimsr_pinned_mtdlpy_dinknet", source_path)
-    if spec is None or spec.loader is None:
+    source_artifact = repository["dinknet_source"]
+    if not isinstance(source_artifact, Mapping):
+        raise MTDLPyAdapterError("pinned MTDLPy DinkNet source identity is missing")
+    source_snapshot = _snapshot_regular_file(
+        str(source_artifact["path"]),
+        role="pinned MTDLPy DinkNet source",
+        expected_sha256=str(source_artifact["sha256"]),
+    )
+    if _snapshot_core(source_snapshot) != _artifact_core(source_artifact):
+        raise MTDLPyAdapterError(
+            "pinned MTDLPy DinkNet source identity differs from validation"
+        )
+    module_name = "_pimsr_pinned_mtdlpy_dinknet"
+    spec = importlib.util.spec_from_loader(
+        module_name, loader=None, origin=str(source_snapshot.path)
+    )
+    if spec is None:
         raise MTDLPyAdapterError("cannot load pinned MTDLPy DinkNet source")
     module = importlib.util.module_from_spec(spec)
+    module.__file__ = str(source_snapshot.path)
     original_ssl_context = ssl._create_default_https_context
     original_dont_write_bytecode = sys.dont_write_bytecode
     try:
-        # Executing a reviewed source file must not dirty the pinned checkout.
+        # Compile and execute the descriptor-pinned bytes.  A pathname loader
+        # could otherwise reopen a different inode after provenance capture.
         sys.dont_write_bytecode = True
-        spec.loader.exec_module(module)
+        code = compile(
+            source_snapshot.payload,
+            str(source_snapshot.path),
+            "exec",
+            dont_inherit=True,
+        )
+        exec(code, module.__dict__)  # noqa: S102 - exact descriptor-pinned source bytes
+    except (OSError, SyntaxError, TypeError) as exc:
+        raise MTDLPyAdapterError("cannot execute pinned MTDLPy DinkNet source") from exc
     finally:
         sys.dont_write_bytecode = original_dont_write_bytecode
         ssl._create_default_https_context = original_ssl_context
@@ -737,18 +1135,17 @@ def _load_upstream_model(
     if calls != 1:
         raise MTDLPyAdapterError("DinkNet50 did not consume the injected local weights")
     require_file_artifact_unchanged(
-        repository["dinknet_source"], role="pinned MTDLPy DinkNet source"
+        _snapshot_core(source_snapshot), role="pinned MTDLPy DinkNet source"
     )
     require_file_artifact_unchanged(
-        _artifact_core(weights), role="local ImageNet weights"
+        _snapshot_core(weight_snapshot), role="local ImageNet weights"
     )
     return model, torchvision
 
 
-def _train_and_predict(
+def _train_model(
     train: TrainingSplit,
     validation: TrainingSplit,
-    test: HeldoutObservations,
     repository: Mapping[str, object],
     weights: Mapping[str, object],
     *,
@@ -771,13 +1168,8 @@ def _train_and_predict(
     preprocessing_start = time.perf_counter()
     observations_train = _preprocess_observations(train.observations)
     observations_validation = _preprocess_observations(validation.observations)
-    observations_test = _preprocess_observations(test.observations)
-    targets_train = _resize_log10_resistivity(
-        train.targets, NETWORK_GRID_SHAPE
-    )
-    targets_validation = _resize_log10_resistivity(
-        validation.targets, NETWORK_GRID_SHAPE
-    )
+    targets_train = _resize_log10_resistivity(train.targets, NETWORK_GRID_SHAPE)
+    targets_validation = _resize_log10_resistivity(validation.targets, NETWORK_GRID_SHAPE)
     preprocessing_wall_time_s = time.perf_counter() - preprocessing_start
 
     initialization_start = time.perf_counter()
@@ -889,8 +1281,104 @@ def _train_and_predict(
     training_wall_time_s = time.perf_counter() - training_start
     if best_state is None:
         raise MTDLPyAdapterError("training produced no validation-selected checkpoint")
-    model.load_state_dict(best_state, strict=True)
+
+    peak_cuda_memory = (
+        int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+    )
+    cuda_device = torch.cuda.get_device_name(device) if device.type == "cuda" else None
+    runtime = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "torch": str(torch.__version__),
+        "torchvision": str(torchvision.__version__),
+        "torch_cuda_build": torch.version.cuda,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "device": str(device),
+        "cuda_device_name": cuda_device,
+        "peak_cuda_memory_bytes": peak_cuda_memory,
+        "preprocessing_wall_time_s": preprocessing_wall_time_s,
+        "model_initialization_wall_time_s": model_initialization_wall_time_s,
+        "training_wall_time_s": training_wall_time_s,
+        "backend_wall_time_s": time.perf_counter() - backend_start,
+    }
+    return TrainingOutcome(
+        state_dict=best_state,
+        training_summary={
+            "best_epoch": best_epoch,
+            "best_validation_mse": best_loss,
+            "history": history,
+        },
+        runtime=runtime,
+    )
+
+
+def _validate_model_state(model: Any, state: Mapping[str, Any], *, torch: Any) -> None:
+    if type(state) is not dict:
+        raise MTDLPyAdapterError("checkpoint model_state must be a plain dictionary")
+    expected = model.state_dict()
+    if set(state) != set(expected) or any(not isinstance(name, str) for name in state):
+        raise MTDLPyAdapterError(
+            "checkpoint model_state keys do not exactly match pinned DinkNet50"
+        )
+    for name, expected_tensor in expected.items():
+        value = state[name]
+        if not isinstance(value, torch.Tensor):
+            raise MTDLPyAdapterError(f"checkpoint model_state[{name!r}] is not a tensor")
+        if (
+            tuple(value.shape) != tuple(expected_tensor.shape)
+            or value.dtype != expected_tensor.dtype
+            or value.layout != expected_tensor.layout
+            or value.device.type != expected_tensor.device.type
+        ):
+            raise MTDLPyAdapterError(
+                f"checkpoint model_state[{name!r}] shape, dtype, layout or device is wrong"
+            )
+        if (value.is_floating_point() or value.is_complex()) and not bool(
+            torch.isfinite(value).all()
+        ):
+            raise MTDLPyAdapterError(
+                f"checkpoint model_state[{name!r}] contains non-finite values"
+            )
+    try:
+        model.load_state_dict(dict(state), strict=True)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise MTDLPyAdapterError(
+            "checkpoint model_state cannot be loaded into pinned DinkNet50"
+        ) from exc
+
+
+def _infer_model(
+    test: HeldoutObservations,
+    state: Mapping[str, Any],
+    repository: Mapping[str, object],
+    weights: Mapping[str, object],
+    *,
+    seed: int,
+    device_name: str,
+    recipe: TrainingRecipe,
+) -> InferenceOutcome:
+    backend_start = time.perf_counter()
+    import torch
+
+    _configure_determinism(torch, seed)
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise MTDLPyAdapterError("CUDA was requested but is unavailable")
+    device = torch.device(device_name)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+    preprocessing_start = time.perf_counter()
+    observations_test = _preprocess_observations(test.observations)
+    preprocessing_wall_time_s = time.perf_counter() - preprocessing_start
+
+    initialization_start = time.perf_counter()
+    model, torchvision = _load_upstream_model(repository, weights, torch=torch)
+    _validate_model_state(model, state, torch=torch)
+    model.to(device)
     model.eval()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    model_initialization_wall_time_s = time.perf_counter() - initialization_start
 
     inference_start = time.perf_counter()
     prediction_batches: list[np.ndarray] = []
@@ -912,38 +1400,27 @@ def _train_and_predict(
     predictions = _resize_log10_resistivity(
         np.concatenate(prediction_batches, axis=0), OUTPUT_GRID_SHAPE
     )
-
     peak_cuda_memory = (
         int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
     )
-    cuda_device = (
-        torch.cuda.get_device_name(device) if device.type == "cuda" else None
-    )
-    runtime = {
-        "python": platform.python_version(),
-        "platform": platform.platform(),
-        "torch": str(torch.__version__),
-        "torchvision": str(torchvision.__version__),
-        "torch_cuda_build": torch.version.cuda,
-        "cuda_available": bool(torch.cuda.is_available()),
-        "device": str(device),
-        "cuda_device_name": cuda_device,
-        "peak_cuda_memory_bytes": peak_cuda_memory,
-        "preprocessing_wall_time_s": preprocessing_wall_time_s,
-        "model_initialization_wall_time_s": model_initialization_wall_time_s,
-        "training_wall_time_s": training_wall_time_s,
-        "inference_wall_time_s": inference_wall_time_s,
-        "backend_wall_time_s": time.perf_counter() - backend_start,
-    }
-    return TrainingOutcome(
-        state_dict=best_state,
+    cuda_device = torch.cuda.get_device_name(device) if device.type == "cuda" else None
+    return InferenceOutcome(
         predicted_log10_resistivity=predictions,
-        training_summary={
-            "best_epoch": best_epoch,
-            "best_validation_mse": best_loss,
-            "history": history,
+        runtime={
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "torch": str(torch.__version__),
+            "torchvision": str(torchvision.__version__),
+            "torch_cuda_build": torch.version.cuda,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "device": str(device),
+            "cuda_device_name": cuda_device,
+            "peak_cuda_memory_bytes": peak_cuda_memory,
+            "preprocessing_wall_time_s": preprocessing_wall_time_s,
+            "model_initialization_wall_time_s": model_initialization_wall_time_s,
+            "inference_wall_time_s": inference_wall_time_s,
+            "backend_wall_time_s": time.perf_counter() - backend_start,
         },
-        runtime=runtime,
     )
 
 
@@ -998,11 +1475,54 @@ def _prediction_npz_bytes(
     return payload.getvalue()
 
 
-def _write_bytes_new(path: Path, payload: bytes) -> None:
-    with path.open("xb") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
+def _remove_owned_part(path: Path, expected_identity: tuple[int, int]) -> None:
+    """Remove only the exact staged inode created by this invocation."""
+    if not os.path.lexists(path):
+        return
+    try:
+        current = path.stat(follow_symlinks=False)
+    except OSError:
+        return
+    if (
+        _path_is_link(path)
+        or not stat.S_ISREG(current.st_mode)
+        or (int(current.st_dev), int(current.st_ino)) != expected_identity
+    ):
+        return
+    path.unlink()
+
+
+def _write_bytes_new(path: Path, payload: bytes) -> tuple[int, int]:
+    identity: tuple[int, int] | None = None
+    try:
+        with path.open("xb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise MTDLPyAdapterError(f"new staged artifact is not regular: {path}")
+            identity = (int(opened.st_dev), int(opened.st_ino))
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+            after = os.fstat(stream.fileno())
+            if (int(after.st_dev), int(after.st_ino)) != identity:
+                raise MTDLPyAdapterError(
+                    f"new staged artifact identity changed while writing: {path}"
+                )
+        return identity
+    except BaseException:
+        if identity is not None:
+            _remove_owned_part(path, identity)
+        raise
+
+
+def _require_owned_snapshot(
+    snapshot: _ArtifactSnapshot,
+    expected_identity: tuple[int, int],
+    *,
+    role: str,
+) -> None:
+    if (snapshot.device, snapshot.inode) != expected_identity:
+        raise MTDLPyAdapterError(f"{role} pathname was replaced after creation")
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -1014,16 +1534,46 @@ def _canonical_json_bytes(value: object) -> bytes:
         raise MTDLPyAdapterError(f"runtime metadata is not strict JSON: {exc}") from exc
 
 
-def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
+def _require_snapshot_matches(
+    actual: _ArtifactSnapshot,
+    expected: _ArtifactSnapshot,
+    *,
+    role: str,
+) -> None:
+    if (
+        actual.sha256 != expected.sha256
+        or actual.size_bytes != expected.size_bytes
+        or actual.device != expected.device
+        or actual.inode != expected.inode
+    ):
+        raise MTDLPyAdapterError(f"{role} changed after validation")
+
+
+def _publish_parts(
+    parts: Sequence[Path],
+    destinations: Sequence[Path],
+    *,
+    expected_snapshots: Sequence[_ArtifactSnapshot] | None = None,
+) -> None:
+    """Publish with no overwrite and identity-aware rollback on BaseException."""
+    if expected_snapshots is None:
+        snapshots = tuple(
+            _snapshot_regular_file(part, role=f"staged artifact {part}") for part in parts
+        )
+    else:
+        snapshots = tuple(expected_snapshots)
+    if len(parts) != len(destinations) or len(parts) != len(snapshots):
+        raise ValueError("publication parts, destinations, and snapshots must align")
     published: list[tuple[Path, tuple[int, int]]] = []
     try:
-        for part, destination in zip(parts, destinations, strict=True):
-            part_info = part.stat(follow_symlinks=False)
-            if part.is_symlink() or not stat.S_ISREG(part_info.st_mode):
-                raise MTDLPyAdapterError(
-                    f"staged artifact must be a regular file: {part}"
-                )
-            expected_identity = (int(part_info.st_dev), int(part_info.st_ino))
+        for part, destination, expected in zip(
+            parts, destinations, snapshots, strict=True
+        ):
+            current_part = _snapshot_regular_file(part, role=f"staged artifact {part}")
+            _require_snapshot_matches(
+                current_part, expected, role=f"staged artifact {part}"
+            )
+            expected_identity = (expected.device, expected.inode)
             try:
                 os.link(part, destination)
             except FileExistsError as exc:
@@ -1034,7 +1584,7 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
                 if os.path.lexists(destination):
                     current = destination.stat(follow_symlinks=False)
                     if (
-                        not destination.is_symlink()
+                        not _path_is_link(destination)
                         and stat.S_ISREG(current.st_mode)
                         and (int(current.st_dev), int(current.st_ino))
                         == expected_identity
@@ -1042,15 +1592,23 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
                         destination.unlink()
                 raise
             published.append((destination, expected_identity))
-            current = destination.stat(follow_symlinks=False)
-            if (
-                destination.is_symlink()
-                or not stat.S_ISREG(current.st_mode)
-                or (int(current.st_dev), int(current.st_ino)) != expected_identity
-            ):
-                raise MTDLPyAdapterError(
-                    f"published artifact identity mismatch: {destination}"
-                )
+            published_snapshot = _snapshot_regular_file(
+                destination, role=f"published artifact {destination}"
+            )
+            _require_snapshot_matches(
+                published_snapshot,
+                expected,
+                role=f"published artifact {destination}",
+            )
+        for destination, expected in zip(destinations, snapshots, strict=True):
+            final_snapshot = _snapshot_regular_file(
+                destination, role=f"published artifact {destination}"
+            )
+            _require_snapshot_matches(
+                final_snapshot,
+                expected,
+                role=f"published artifact {destination}",
+            )
     except BaseException as exc:
         unsafe: list[str] = []
         for destination, expected_identity in reversed(published):
@@ -1058,7 +1616,7 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
                 continue
             current = destination.stat(follow_symlinks=False)
             if (
-                destination.is_symlink()
+                _path_is_link(destination)
                 or not stat.S_ISREG(current.st_mode)
                 or (int(current.st_dev), int(current.st_ino)) != expected_identity
             ):
@@ -1074,31 +1632,38 @@ def _publish_parts(parts: Sequence[Path], destinations: Sequence[Path]) -> None:
 
 
 def _output_paths(
-    checkpoint: str | Path,
-    predictions: str | Path,
-    runtime: str | Path,
-) -> tuple[tuple[Path, Path, Path], tuple[Path, Path, Path]]:
-    paths = tuple(Path(path).resolve() for path in (checkpoint, predictions, runtime))
-    if len(set(paths)) != 3:
-        raise ValueError("checkpoint, prediction and runtime outputs must be distinct")
-    for path, suffix in zip(paths, (".pt", ".npz", ".json"), strict=True):
+    values: Sequence[str | Path],
+    suffixes: Sequence[str],
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    paths = tuple(Path(os.path.abspath(os.fspath(path))) for path in values)
+    if not paths or len(paths) != len(suffixes) or len(set(paths)) != len(paths):
+        raise ValueError("MTDLPy output paths must be non-empty and distinct")
+    for path, suffix in zip(paths, suffixes, strict=True):
+        if os.path.lexists(path) and _path_is_link(path):
+            raise MTDLPyAdapterError(
+                f"MTDLPy output must not be a symbolic link or junction: {path}"
+            )
         if path.suffix.lower() != suffix:
             raise ValueError(f"MTDLPy output {path} must use the {suffix} suffix")
         path.parent.mkdir(parents=True, exist_ok=True)
-    existing = [path for path in paths if path.exists() or path.is_symlink()]
+    existing = [path for path in paths if os.path.lexists(path)]
     if existing:
         raise FileExistsError(
             "refusing to overwrite existing MTDLPy output(s): "
             + ", ".join(str(path) for path in existing)
         )
     parts = tuple(path.with_name(path.name + ".part") for path in paths)
-    stale = [path for path in parts if path.exists() or path.is_symlink()]
+    stale = [path for path in parts if os.path.lexists(path)]
     if stale:
         raise FileExistsError(
             "stale MTDLPy partial output(s) require inspection: "
             + ", ".join(str(path) for path in stale)
         )
     return paths, parts
+
+
+def _regular_input_artifact(path: str | Path, *, role: str) -> dict[str, object]:
+    return _snapshot_core(_snapshot_regular_file(path, role=role))
 
 
 def _checkpoint_bytes(value: Mapping[str, object]) -> bytes:
@@ -1109,34 +1674,372 @@ def _checkpoint_bytes(value: Mapping[str, object]) -> bytes:
     return payload.getvalue()
 
 
-def run_common_retrain(
+def _geometry_contract(value: TrainingSplit | HeldoutObservations) -> dict[str, object]:
+    return {
+        "frequency_hz": np.asarray(value.frequencies, dtype="<f8").tolist(),
+        "station_x_m": np.asarray(value.station_x, dtype="<f8").tolist(),
+        "x_cell_centers_m": np.asarray(value.x_grid, dtype="<f8").tolist(),
+        "depth_cell_centers_m": np.asarray(value.depth_grid, dtype="<f8").tolist(),
+        "input_grid_shape": list(INPUT_GRID_SHAPE),
+        "output_grid_shape": list(OUTPUT_GRID_SHAPE),
+    }
+
+
+def _require_geometry_contract(
+    expected: Mapping[str, object], value: HeldoutObservations
+) -> None:
+    if not _strict_metadata_equal(expected, _geometry_contract(value)):
+        raise MTDLPyAdapterError(
+            "held-out observation geometry differs from checkpoint training geometry"
+        )
+
+
+def _validate_training_geometry_metadata(value: object) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "frequency_hz",
+        "station_x_m",
+        "x_cell_centers_m",
+        "depth_cell_centers_m",
+        "input_grid_shape",
+        "output_grid_shape",
+    }:
+        raise MTDLPyAdapterError("MTDLPy checkpoint training geometry is not exact")
+    if value["input_grid_shape"] != list(INPUT_GRID_SHAPE) or value[
+        "output_grid_shape"
+    ] != list(OUTPUT_GRID_SHAPE):
+        raise MTDLPyAdapterError("MTDLPy checkpoint training geometry shape is wrong")
+    expected_sizes = {
+        "frequency_hz": INPUT_GRID_SHAPE[0],
+        "station_x_m": INPUT_GRID_SHAPE[1],
+        "x_cell_centers_m": OUTPUT_GRID_SHAPE[1],
+        "depth_cell_centers_m": OUTPUT_GRID_SHAPE[0],
+    }
+    for name, size in expected_sizes.items():
+        if not isinstance(value[name], list) or any(
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            for item in value[name]
+        ):
+            raise MTDLPyAdapterError(
+                f"MTDLPy checkpoint training geometry {name} must be a numeric list"
+            )
+        array = np.asarray(value[name], dtype=np.float64)
+        if (
+            array.shape != (size,)
+            or not np.isfinite(array).all()
+            or np.any(np.diff(array) <= 0)
+        ):
+            raise MTDLPyAdapterError(
+                f"MTDLPy checkpoint training geometry {name} is invalid"
+            )
+        if name in {"frequency_hz", "depth_cell_centers_m"} and np.any(array <= 0):
+            raise MTDLPyAdapterError(
+                f"MTDLPy checkpoint training geometry {name} must be positive"
+            )
+
+
+_SAFE_FALSE_PRESCORE_DECLARATIONS = frozenset(
+    {
+        "contains_truth",
+        "heldout_truth_available_to_adapter",
+        "truth_keys_accepted",
+    }
+)
+
+
+def _metadata_key_is_forbidden(key: str, value: object) -> bool:
+    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized = re.sub(r"[^a-z0-9]+", "_", camel_split.lower()).strip("_")
+    if normalized in _SAFE_FALSE_PRESCORE_DECLARATIONS and value is False:
+        return False
+    tokens = normalized.split("_")
+    if any(
+        left == "generator" and right in {"seed", "seeds"}
+        for left, right in pairwise(tokens)
+    ):
+        return True
+    if any(
+        token in {"hidden", "operator", "secret", "truth", "withheld"} for token in tokens
+    ):
+        return True
+    return any(
+        left == "sample" and right in {"id", "ids"} for left, right in pairwise(tokens)
+    )
+
+
+def _require_no_prescore_metadata(value: object, *, where: str) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise MTDLPyAdapterError(f"{where} contains a non-string metadata key")
+            if _metadata_key_is_forbidden(key, child):
+                raise MTDLPyAdapterError(
+                    f"{where} exposes forbidden pre-score metadata key {key!r}"
+                )
+            _require_no_prescore_metadata(child, where=where)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for child in value:
+            _require_no_prescore_metadata(child, where=where)
+
+
+def _validate_backend_runtime(value: object, *, phase: str) -> None:
+    if not isinstance(value, Mapping):
+        raise MTDLPyAdapterError(f"MTDLPy {phase} runtime must be a mapping")
+    expected = {
+        "training": _TRAINING_BACKEND_RUNTIME_KEYS,
+        "inference": _INFERENCE_BACKEND_RUNTIME_KEYS,
+    }.get(phase)
+    if expected is None:  # pragma: no cover - internal closed call sites
+        raise AssertionError(f"unsupported MTDLPy runtime phase: {phase}")
+    if set(value) != set(expected):
+        raise MTDLPyAdapterError(f"MTDLPy {phase} runtime schema is not exact")
+    for name in ("python", "platform", "torch", "torchvision"):
+        item = value[name]
+        if not isinstance(item, str) or not item:
+            raise MTDLPyAdapterError(
+                f"MTDLPy {phase} runtime {name} must be a non-empty string"
+            )
+    torch_cuda_build = value["torch_cuda_build"]
+    if torch_cuda_build is not None and (
+        not isinstance(torch_cuda_build, str) or not torch_cuda_build
+    ):
+        raise MTDLPyAdapterError(
+            f"MTDLPy {phase} runtime torch_cuda_build must be null or a non-empty string"
+        )
+    if not isinstance(value["cuda_available"], bool):
+        raise MTDLPyAdapterError(f"MTDLPy {phase} runtime cuda_available must be boolean")
+    device = value["device"]
+    if device not in {"cpu", "cuda"}:
+        raise MTDLPyAdapterError(f"MTDLPy {phase} runtime device must be cpu or cuda")
+    cuda_device_name = value["cuda_device_name"]
+    if device == "cuda":
+        if (
+            value["cuda_available"] is not True
+            or not isinstance(cuda_device_name, str)
+            or not cuda_device_name
+        ):
+            raise MTDLPyAdapterError(
+                f"MTDLPy {phase} CUDA runtime must identify an available CUDA device"
+            )
+    elif cuda_device_name is not None:
+        raise MTDLPyAdapterError(
+            f"MTDLPy {phase} CPU runtime must not identify a CUDA execution device"
+        )
+    peak = value["peak_cuda_memory_bytes"]
+    if isinstance(peak, bool) or not isinstance(peak, int) or peak < 0:
+        raise MTDLPyAdapterError(
+            f"MTDLPy {phase} runtime peak_cuda_memory_bytes must be a non-negative integer"
+        )
+    if device == "cpu" and peak != 0:
+        raise MTDLPyAdapterError(
+            f"MTDLPy {phase} CPU runtime peak_cuda_memory_bytes must be zero"
+        )
+    for name in {
+        "preprocessing_wall_time_s",
+        "model_initialization_wall_time_s",
+        "backend_wall_time_s",
+        f"{phase}_wall_time_s",
+    }:
+        item = value[name]
+        if (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not np.isfinite(float(item))
+            or float(item) < 0.0
+        ):
+            raise MTDLPyAdapterError(
+                f"MTDLPy {phase} runtime {name} must be finite and non-negative"
+            )
+    component_sum = sum(
+        float(value[name])
+        for name in (
+            "preprocessing_wall_time_s",
+            "model_initialization_wall_time_s",
+            f"{phase}_wall_time_s",
+        )
+    )
+    if float(value["backend_wall_time_s"]) + 1e-12 < component_sum:
+        raise MTDLPyAdapterError(
+            f"MTDLPy {phase} backend_wall_time_s is shorter than its components"
+        )
+    _canonical_json_bytes(value)
+    _require_no_prescore_metadata(value, where=f"MTDLPy {phase} runtime")
+
+
+def _decode_checkpoint_snapshot(snapshot: _ArtifactSnapshot) -> dict[str, object]:
+    try:
+        import torch
+
+        loaded = torch.load(
+            io.BytesIO(snapshot.payload),
+            map_location="cpu",
+            weights_only=True,
+        )
+    except Exception as exc:
+        raise MTDLPyAdapterError(
+            "MTDLPy checkpoint is not loadable by the restricted weights-only loader"
+        ) from exc
+    if type(loaded) is not dict or set(loaded) != CHECKPOINT_KEYS:
+        raise MTDLPyAdapterError("MTDLPy checkpoint root schema is not exact")
+    if type(loaded["model_state"]) is not dict:
+        raise MTDLPyAdapterError(
+            "MTDLPy checkpoint model_state must be a plain dictionary"
+        )
+    metadata = {key: value for key, value in loaded.items() if key != "model_state"}
+    _require_no_prescore_metadata(metadata, where="MTDLPy checkpoint")
+    return loaded
+
+
+def _load_checkpoint_safely(
+    path: str | Path,
+) -> tuple[dict[str, object], dict[str, object]]:
+    snapshot = _snapshot_regular_file(
+        path,
+        role="MTDLPy checkpoint",
+        max_size_bytes=MAX_CHECKPOINT_SIZE_BYTES,
+    )
+    return _decode_checkpoint_snapshot(snapshot), _snapshot_core(snapshot)
+
+
+def _validate_checkpoint_metadata(
+    checkpoint: Mapping[str, object],
+    *,
+    repository: Mapping[str, object],
+    weights: Mapping[str, object],
+    train_artifact: Mapping[str, object],
+    validation_artifact: Mapping[str, object],
+    dependency_closure: Mapping[str, object],
+    seed: int,
+    recipe: TrainingRecipe,
+) -> None:
+    if type(checkpoint) is not dict or set(checkpoint) != CHECKPOINT_KEYS:
+        raise MTDLPyAdapterError("MTDLPy checkpoint root schema is not exact")
+    _require_no_prescore_metadata(
+        {key: value for key, value in checkpoint.items() if key != "model_state"},
+        where="MTDLPy checkpoint",
+    )
+    if (
+        checkpoint["checkpoint_schema"] != CHECKPOINT_SCHEMA
+        or not isinstance(checkpoint["checkpoint_schema"], str)
+        or checkpoint["checkpoint_schema_version"] != CHECKPOINT_SCHEMA_VERSION
+        or isinstance(checkpoint["checkpoint_schema_version"], bool)
+        or not isinstance(checkpoint["checkpoint_schema_version"], int)
+        or checkpoint["method"] != "MTDLPy/DinkNet50"
+        or checkpoint["track"] != "common-retrain"
+        or checkpoint["seed"] != seed
+        or isinstance(checkpoint["seed"], bool)
+        or not isinstance(checkpoint["seed"], int)
+        or checkpoint["recipe_id"] != recipe.recipe_id
+    ):
+        raise MTDLPyAdapterError("MTDLPy checkpoint identity, seed or recipe is wrong")
+    if (
+        checkpoint["truth_keys_accepted"] is not False
+        or checkpoint["contains_truth"] is not False
+        or checkpoint["contains_observation_campaign"] is not False
+    ):
+        raise MTDLPyAdapterError(
+            "MTDLPy checkpoint does not prove campaign-independent truth-free state"
+        )
+    expected_datasets = {
+        "train": dict(train_artifact),
+        "validation": dict(validation_artifact),
+    }
+    if not _strict_metadata_equal(checkpoint["dataset_identities"], expected_datasets):
+        raise MTDLPyAdapterError(
+            "MTDLPy checkpoint train/validation identities do not match exact inputs"
+        )
+    if not _strict_metadata_equal(checkpoint["source"], repository):
+        raise MTDLPyAdapterError("MTDLPy checkpoint upstream source identity is wrong")
+    if not _strict_metadata_equal(checkpoint["imagenet_weights"], weights):
+        raise MTDLPyAdapterError("MTDLPy checkpoint ImageNet identity is wrong")
+    if not _strict_metadata_equal(
+        checkpoint["training_config"], _training_config(seed, recipe)
+    ):
+        raise MTDLPyAdapterError("MTDLPy checkpoint training recipe is not exact")
+    if not _strict_metadata_equal(checkpoint["preprocessing"], _preprocessing_contract()):
+        raise MTDLPyAdapterError("MTDLPy checkpoint preprocessing contract is not exact")
+    if not _strict_metadata_equal(checkpoint["dependency_closure"], dependency_closure):
+        raise MTDLPyAdapterError("MTDLPy checkpoint dependency closure is not exact")
+    geometry = checkpoint["training_geometry"]
+    _validate_training_geometry_metadata(geometry)
+    summary = checkpoint["training_summary"]
+    if type(summary) is not dict:
+        raise MTDLPyAdapterError("MTDLPy checkpoint training summary is invalid")
+    best_epoch = summary.get("best_epoch")
+    best_loss = summary.get("best_validation_mse")
+    history = summary.get("history")
+    if (
+        set(summary) != {"best_epoch", "best_validation_mse", "history"}
+        or isinstance(best_epoch, bool)
+        or not isinstance(best_epoch, int)
+        or not 1 <= best_epoch <= recipe.epochs
+        or isinstance(best_loss, bool)
+        or not isinstance(best_loss, (int, float))
+        or not np.isfinite(float(best_loss))
+        or not isinstance(history, list)
+        or len(history) != recipe.epochs
+    ):
+        raise MTDLPyAdapterError("MTDLPy checkpoint training summary is not exact")
+    validation_losses: list[float] = []
+    for expected_epoch, entry in enumerate(history, start=1):
+        if type(entry) is not dict or set(entry) != {
+            "epoch",
+            "train_mse",
+            "validation_mse",
+        }:
+            raise MTDLPyAdapterError("MTDLPy checkpoint training history is not exact")
+        epoch = entry["epoch"]
+        train_mse = entry["train_mse"]
+        validation_mse = entry["validation_mse"]
+        if (
+            isinstance(epoch, bool)
+            or not isinstance(epoch, int)
+            or epoch != expected_epoch
+            or isinstance(train_mse, bool)
+            or not isinstance(train_mse, (int, float))
+            or not np.isfinite(float(train_mse))
+            or float(train_mse) < 0
+            or isinstance(validation_mse, bool)
+            or not isinstance(validation_mse, (int, float))
+            or not np.isfinite(float(validation_mse))
+            or float(validation_mse) < 0
+        ):
+            raise MTDLPyAdapterError(
+                "MTDLPy checkpoint training history contains invalid values"
+            )
+        validation_losses.append(float(validation_mse))
+    selected_loss = min(validation_losses)
+    selected_epoch = validation_losses.index(selected_loss) + 1
+    if best_epoch != selected_epoch or float(best_loss) != selected_loss:
+        raise MTDLPyAdapterError(
+            "MTDLPy checkpoint best validation selection does not match history"
+        )
+    _validate_backend_runtime(checkpoint["training_runtime"], phase="training")
+
+
+def train_common_retrain(
     *,
     repository_path: str | Path,
     imagenet_weights_path: str | Path,
     imagenet_weights_sha256: str,
     train_h5: str | Path,
     validation_h5: str | Path,
-    observations_npz: str | Path,
     seed: int,
     device: str,
     checkpoint_out: str | Path,
-    predictions_out: str | Path,
     runtime_out: str | Path,
     recipe_id: str = DEFAULT_RECIPE_ID,
     command: Sequence[str] | None = None,
     runner_source: str | Path | None = None,
 ) -> dict[str, object]:
-    """Run one preregistered MTDLPy seed and immutably publish its artifacts."""
+    """Train exactly one seed checkpoint without opening any test campaign."""
     if isinstance(seed, bool) or seed not in COMMON_RETRAIN_SEEDS:
         raise ValueError(f"seed must be one of {COMMON_RETRAIN_SEEDS}")
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'")
     recipe = training_recipe(recipe_id)
-    destinations, parts = _output_paths(
-        checkpoint_out, predictions_out, runtime_out
-    )
-    checkpoint_path, prediction_path, _runtime_path = destinations
-    checkpoint_part, prediction_part, runtime_part = parts
+    destinations, parts = _output_paths((checkpoint_out, runtime_out), (".pt", ".json"))
+    checkpoint_path, _runtime_path = destinations
+    checkpoint_part, runtime_part = parts
 
     started_at = datetime.now(UTC)
     wall_start = time.perf_counter()
@@ -1145,144 +2048,335 @@ def run_common_retrain(
         imagenet_weights_path, imagenet_weights_sha256
     )
     train = load_training_split(train_h5, role="MTDLPy training dataset")
-    validation = load_training_split(
-        validation_h5, role="MTDLPy validation dataset"
-    )
-    test = load_heldout_observations(observations_npz)
+    validation = load_training_split(validation_h5, role="MTDLPy validation dataset")
     _require_same_geometry(train, validation, where="train and validation datasets")
-    _require_same_geometry(train, test, where="train and held-out observations")
-    _require_disjoint_samples(train, validation, test)
-
+    _require_training_disjoint(train, validation)
+    closure = _dependency_closure(
+        repository=repository,
+        weights=weights,
+        runner_source=runner_source,
+    )
+    closure_sources = closure["local_source_artifacts"]
+    assert isinstance(closure_sources, Mapping)
     source_artifacts: dict[str, Mapping[str, object]] = {
         "train_dataset": train.provenance,
         "validation_dataset": validation.provenance,
-        "heldout_observations": test.provenance,
         "imagenet_weights": weights,
         "dinknet_source": repository["dinknet_source"],
-        "adapter_source": file_artifact_provenance(__file__),
+        "adapter_source": closure_sources["adapter"],
+        "dataset_contract_loader_source": closure_sources["pimsr_inversion_contracts2d"],
+        "materializer_contract_source": closure_sources["dataset2d_materialization"],
+        "artifact_guard_source": closure_sources["runner2d"],
     }
-    if runner_source is not None:
-        source_artifacts["runner_source"] = file_artifact_provenance(runner_source)
+    if "cli_runner" in closure_sources:
+        source_artifacts["runner_source"] = closure_sources["cli_runner"]
 
-    outcome = _train_and_predict(
+    outcome = _train_model(
         train,
         validation,
-        test,
         repository,
         weights,
         seed=seed,
         device_name=device,
         recipe=recipe,
     )
-    predictions = np.asarray(outcome.predicted_log10_resistivity, dtype="<f4")
-    expected_prediction_shape = (test.sample_index.size, *OUTPUT_GRID_SHAPE)
-    if predictions.shape != expected_prediction_shape or not np.isfinite(
-        predictions
-    ).all():
+    if (
+        type(outcome) is not TrainingOutcome
+        or type(outcome.state_dict) is not dict
+        or type(outcome.training_summary) is not dict
+        or type(outcome.runtime) is not dict
+    ):
         raise MTDLPyAdapterError(
-            f"backend predictions must be finite with shape {expected_prediction_shape}"
+            "MTDLPy training backend returned a malformed TrainingOutcome"
         )
-
-    for role, artifact in source_artifacts.items():
-        require_file_artifact_unchanged(_artifact_core(artifact), role=role)
-    if verify_pinned_repository(repository_path) != repository:
-        raise MTDLPyAdapterError("pinned MTDLPy repository changed during the run")
-
-    training_config = {
-        "campaign_seeds": list(COMMON_RETRAIN_SEEDS),
-        "recipe_id": recipe.recipe_id,
-        "seed": seed,
-        "epochs": recipe.epochs,
-        "batch_size": recipe.batch_size,
-        "optimizer": {
-            "name": "Adam",
-            "learning_rate": recipe.learning_rate,
-            "betas": list(ADAM_BETAS),
-            "eps": ADAM_EPS,
-            "weight_decay": WEIGHT_DECAY,
-        },
-        "scheduler": None,
-        "early_stopping": None,
-        "gradient_clip_max_norm": GRAD_CLIP_NORM,
-        "loss": "mean_squared_error_mean",
-        "checkpoint_selection": "lowest validation MSE; strict less-than; first tie",
-        "normalization": "none",
-        "schedule_origin": recipe.schedule_origin,
-    }
-    preprocessing = {
-        "input_channel_order": list(OBSERVATION_CHANNEL_ORDER),
-        "observation_axis_order": ["sample", "channel", "frequency", "station"],
-        "network_spatial_axis_order": ["station_resampled", "frequency_resampled"],
-        "transpose_observations": True,
-        "observation_transform_order": {
-            "apparent_resistivity": (
-                "pow10_to_linear_then_bilinear_resize_then_log10_then_transpose"
-            ),
-            "phase": "bilinear_resize_then_transpose",
-        },
-        "input_units": ["log10_ohm_m", "degree", "log10_ohm_m", "degree"],
-        "observation_resize": "8x12_to_32x32",
-        "observation_resize_origin": (
-            "benchmark-native geometry adaptation preserving upstream transform order"
-        ),
-        "training_target_resize": (
-            "pow10_to_linear_then_64x48_to_32x32_then_log10"
-        ),
-        "training_target_axis_order": ["sample", "depth", "x"],
-        "prediction_resize": (
-            "pow10_to_linear_then_32x32_to_64x48_then_log10"
-        ),
-        "prediction_resize_origin": (
-            "benchmark-native evaluation-grid adaptation; upstream does not define "
-            "this inverse regridding"
-        ),
-        "interpolation": {
-            "kind": "bilinear",
-            "coordinate_transform": "half_pixel",
-            "boundary": "clamp_to_edge",
-            "implementation": "pimsr_benchmarks.mtdlpy.resize_bilinear_half_pixel",
-            "dtype": "float64_accumulation_float32_output",
-            "antialias": False,
-        },
-        "missing_data_policy": "reject_if_valid_mask_is_not_all_true",
-        "phase_domain_adaptation": (
-            "retain benchmark canonical [0,180) phases; do not apply the upstream "
-            "loader's [0,90] sample rejection"
-        ),
-        "upstream_pipeline_claim": "semantic preprocessing order only, not byte-exact",
-        "test_tuning": False,
-        "evaluation_floors_used_as_model_input": False,
-    }
-    checkpoint = {
+    _validate_backend_runtime(outcome.runtime, phase="training")
+    training_config = _training_config(seed, recipe)
+    preprocessing = _preprocessing_contract()
+    checkpoint: dict[str, object] = {
         "checkpoint_schema": CHECKPOINT_SCHEMA,
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "method": "MTDLPy/DinkNet50",
         "track": "common-retrain",
         "seed": seed,
-        "model_state": outcome.state_dict,
+        "recipe_id": recipe.recipe_id,
+        "model_state": dict(outcome.state_dict),
         "training_config": training_config,
         "preprocessing": preprocessing,
         "training_summary": dict(outcome.training_summary),
+        "training_runtime": dict(outcome.runtime),
         "source": repository,
         "imagenet_weights": weights,
         "dataset_identities": {
-            "train": {
-                **dict(train.provenance),
-                "generator_seed": train.generator_seed,
-                "sample_identity": "(generator_seed,sample_index)",
-            },
-            "validation": {
-                **dict(validation.provenance),
-                "generator_seed": validation.generator_seed,
-                "sample_identity": "(generator_seed,sample_index)",
-            },
-            "heldout_observations": dict(test.provenance),
+            "train": dict(train.provenance),
+            "validation": dict(validation.provenance),
         },
-        "heldout_truth_available_to_adapter": False,
+        "training_geometry": _geometry_contract(train),
+        "dependency_closure": closure,
+        "truth_keys_accepted": False,
+        "contains_truth": False,
+        "contains_observation_campaign": False,
     }
+    _validate_checkpoint_metadata(
+        checkpoint,
+        repository=repository,
+        weights=weights,
+        train_artifact=train.provenance,
+        validation_artifact=validation.provenance,
+        dependency_closure=closure,
+        seed=seed,
+        recipe=recipe,
+    )
+    import torch
+
+    validation_model, _torchvision = _load_upstream_model(
+        repository, weights, torch=torch
+    )
+    _validate_model_state(validation_model, checkpoint["model_state"], torch=torch)
+    owned_parts: dict[Path, tuple[int, int]] = {}
     try:
-        _write_bytes_new(checkpoint_part, _checkpoint_bytes(checkpoint))
-        _write_bytes_new(
+        for role, artifact in source_artifacts.items():
+            require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+        if verify_pinned_repository(repository_path) != repository:
+            raise MTDLPyAdapterError("pinned MTDLPy repository changed during training")
+        owned_parts[checkpoint_part] = _write_bytes_new(
+            checkpoint_part, _checkpoint_bytes(checkpoint)
+        )
+        checkpoint_snapshot = _snapshot_regular_file(
+            checkpoint_part,
+            role="staged MTDLPy checkpoint",
+            max_size_bytes=MAX_CHECKPOINT_SIZE_BYTES,
+        )
+        _require_owned_snapshot(
+            checkpoint_snapshot,
+            owned_parts[checkpoint_part],
+            role="staged MTDLPy checkpoint",
+        )
+        roundtrip_checkpoint = _decode_checkpoint_snapshot(checkpoint_snapshot)
+        checkpoint_staged = _snapshot_core(checkpoint_snapshot)
+        _validate_checkpoint_metadata(
+            roundtrip_checkpoint,
+            repository=repository,
+            weights=weights,
+            train_artifact=train.provenance,
+            validation_artifact=validation.provenance,
+            dependency_closure=closure,
+            seed=seed,
+            recipe=recipe,
+        )
+        _validate_model_state(
+            validation_model,
+            roundtrip_checkpoint["model_state"],
+            torch=torch,
+        )
+        checkpoint_identity = {**checkpoint_staged, "path": str(checkpoint_path)}
+        finished_at = datetime.now(UTC)
+        bindings: dict[str, object] = {
+            "training_seed": seed,
+            "source_commit": repository["commit"],
+            "source_clean_worktree": True,
+            "upstream_source_sha256": repository["dinknet_source"]["sha256"],
+            "adapter_source_sha256": closure_sources["adapter"]["sha256"],
+            "train_sha256": train.provenance["sha256"],
+            "validation_sha256": validation.provenance["sha256"],
+            "imagenet_weights_sha256": weights["sha256"],
+            "dependency_closure_sha256": _canonical_object_sha256(closure),
+            "checkpoint_sha256": checkpoint_staged["sha256"],
+        }
+        if "cli_runner" in closure_sources:
+            bindings["runner_source_sha256"] = closure_sources["cli_runner"]["sha256"]
+        runtime = {
+            "schema": TRAINING_RUNTIME_SCHEMA,
+            "schema_version": TRAINING_RUNTIME_SCHEMA_VERSION,
+            "method": "MTDLPy/DinkNet50",
+            "track": "common-retrain",
+            "operation": "train_checkpoint_once",
+            "seed": seed,
+            "started_at_utc": started_at.isoformat(),
+            "finished_at_utc": finished_at.isoformat(),
+            "adapter_wall_time_s": time.perf_counter() - wall_start,
+            "command": list(command) if command is not None else None,
+            "working_directory": str(Path.cwd().resolve()),
+            "repository": repository,
+            "source_artifacts": {
+                key: dict(value) for key, value in source_artifacts.items()
+            },
+            "training_config": training_config,
+            "preprocessing": preprocessing,
+            "training_summary": dict(outcome.training_summary),
+            "runtime": dict(outcome.runtime),
+            "dependency_closure": closure,
+            "truth_keys_accepted": False,
+            "contains_truth": False,
+            "observation_campaigns_accessed": False,
+            "bindings": bindings,
+            "outputs": {"checkpoint": checkpoint_identity},
+        }
+        _require_no_prescore_metadata(runtime, where="MTDLPy training runtime")
+        for role, artifact in source_artifacts.items():
+            require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+        require_file_artifact_unchanged(
+            checkpoint_staged, role="staged MTDLPy checkpoint"
+        )
+        if verify_pinned_repository(repository_path) != repository:
+            raise MTDLPyAdapterError(
+                "pinned MTDLPy repository changed before checkpoint publication"
+            )
+        runtime_payload = _canonical_json_bytes(runtime)
+        owned_parts[runtime_part] = _write_bytes_new(runtime_part, runtime_payload)
+        runtime_snapshot = _snapshot_regular_file(
+            runtime_part, role="staged MTDLPy training runtime"
+        )
+        _require_owned_snapshot(
+            runtime_snapshot,
+            owned_parts[runtime_part],
+            role="staged MTDLPy training runtime",
+        )
+        if runtime_snapshot.payload != runtime_payload:
+            raise MTDLPyAdapterError("staged training runtime changed after writing")
+        for role, artifact in source_artifacts.items():
+            require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+        require_file_artifact_unchanged(
+            checkpoint_staged, role="staged MTDLPy checkpoint"
+        )
+        if verify_pinned_repository(repository_path) != repository:
+            raise MTDLPyAdapterError(
+                "pinned MTDLPy repository changed during runtime staging"
+            )
+        _publish_parts(
+            parts,
+            destinations,
+            expected_snapshots=(checkpoint_snapshot, runtime_snapshot),
+        )
+        return runtime
+    finally:
+        for part, identity in owned_parts.items():
+            _remove_owned_part(part, identity)
+
+
+def infer_common_retrain(
+    *,
+    repository_path: str | Path,
+    imagenet_weights_path: str | Path,
+    imagenet_weights_sha256: str,
+    train_h5: str | Path,
+    validation_h5: str | Path,
+    checkpoint: str | Path,
+    observations_npz: str | Path,
+    seed: int,
+    device: str,
+    predictions_out: str | Path,
+    runtime_out: str | Path,
+    recipe_id: str = DEFAULT_RECIPE_ID,
+    command: Sequence[str] | None = None,
+    runner_source: str | Path | None = None,
+) -> dict[str, object]:
+    """Infer one truth-free campaign from an immutable seed checkpoint."""
+    if isinstance(seed, bool) or seed not in COMMON_RETRAIN_SEEDS:
+        raise ValueError(f"seed must be one of {COMMON_RETRAIN_SEEDS}")
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be 'cpu' or 'cuda'")
+    recipe = training_recipe(recipe_id)
+    destinations, parts = _output_paths((predictions_out, runtime_out), (".npz", ".json"))
+    prediction_path, _runtime_path = destinations
+    prediction_part, runtime_part = parts
+
+    started_at = datetime.now(UTC)
+    wall_start = time.perf_counter()
+    repository = verify_pinned_repository(repository_path)
+    weights = validate_local_imagenet_weights(
+        imagenet_weights_path, imagenet_weights_sha256
+    )
+    train_artifact = _regular_input_artifact(train_h5, role="MTDLPy training dataset")
+    validation_artifact = _regular_input_artifact(
+        validation_h5, role="MTDLPy validation dataset"
+    )
+    if train_artifact["sha256"] == validation_artifact["sha256"]:
+        raise MTDLPyAdapterError("train and validation artifacts must differ")
+    closure = _dependency_closure(
+        repository=repository,
+        weights=weights,
+        runner_source=runner_source,
+    )
+    checkpoint_snapshot = _snapshot_regular_file(
+        checkpoint,
+        role="MTDLPy checkpoint",
+        max_size_bytes=MAX_CHECKPOINT_SIZE_BYTES,
+    )
+    checkpoint_state = _decode_checkpoint_snapshot(checkpoint_snapshot)
+    checkpoint_artifact = _snapshot_core(checkpoint_snapshot)
+    _validate_checkpoint_metadata(
+        checkpoint_state,
+        repository=repository,
+        weights=weights,
+        train_artifact=train_artifact,
+        validation_artifact=validation_artifact,
+        dependency_closure=closure,
+        seed=seed,
+        recipe=recipe,
+    )
+    test = load_heldout_observations(observations_npz)
+    geometry = checkpoint_state["training_geometry"]
+    assert isinstance(geometry, Mapping)
+    _require_geometry_contract(geometry, test)
+    if test.provenance["sha256"] in {
+        train_artifact["sha256"],
+        validation_artifact["sha256"],
+        checkpoint_artifact["sha256"],
+    }:
+        raise MTDLPyAdapterError(
+            "observation campaign must differ from training, validation and checkpoint"
+        )
+
+    outcome = _infer_model(
+        test,
+        checkpoint_state["model_state"],
+        repository,
+        weights,
+        seed=seed,
+        device_name=device,
+        recipe=recipe,
+    )
+    if type(outcome) is not InferenceOutcome or type(outcome.runtime) is not dict:
+        raise MTDLPyAdapterError(
+            "MTDLPy inference backend returned a malformed InferenceOutcome"
+        )
+    _validate_backend_runtime(outcome.runtime, phase="inference")
+    predictions = np.asarray(outcome.predicted_log10_resistivity, dtype="<f4")
+    expected_prediction_shape = (test.sample_index.size, *OUTPUT_GRID_SHAPE)
+    if (
+        predictions.shape != expected_prediction_shape
+        or not np.isfinite(predictions).all()
+    ):
+        raise MTDLPyAdapterError(
+            f"backend predictions must be finite with shape {expected_prediction_shape}"
+        )
+
+    closure_sources = closure["local_source_artifacts"]
+    assert isinstance(closure_sources, Mapping)
+    source_artifacts: dict[str, Mapping[str, object]] = {
+        "train_dataset": train_artifact,
+        "validation_dataset": validation_artifact,
+        "heldout_observations": test.provenance,
+        "imagenet_weights": weights,
+        "dinknet_source": repository["dinknet_source"],
+        "adapter_source": closure_sources["adapter"],
+        "dataset_contract_loader_source": closure_sources["pimsr_inversion_contracts2d"],
+        "materializer_contract_source": closure_sources["dataset2d_materialization"],
+        "artifact_guard_source": closure_sources["runner2d"],
+    }
+    if "cli_runner" in closure_sources:
+        source_artifacts["runner_source"] = closure_sources["cli_runner"]
+    for role, artifact in source_artifacts.items():
+        require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+    require_file_artifact_unchanged(
+        checkpoint_artifact, role="MTDLPy reusable checkpoint"
+    )
+    if verify_pinned_repository(repository_path) != repository:
+        raise MTDLPyAdapterError("pinned MTDLPy repository changed during inference")
+
+    owned_parts: dict[Path, tuple[int, int]] = {}
+    try:
+        owned_parts[prediction_part] = _write_bytes_new(
             prediction_part,
             _prediction_npz_bytes(
                 str(test.provenance["sha256"]),
@@ -1292,23 +2386,41 @@ def run_common_retrain(
                 predictions,
             ),
         )
-        checkpoint_staged = file_artifact_provenance(checkpoint_part)
-        prediction_staged = file_artifact_provenance(prediction_part)
-        checkpoint_identity = {
-            **checkpoint_staged,
-            "path": str(checkpoint_path),
+        prediction_snapshot = _snapshot_regular_file(
+            prediction_part, role="staged MTDLPy predictions"
+        )
+        _require_owned_snapshot(
+            prediction_snapshot,
+            owned_parts[prediction_part],
+            role="staged MTDLPy predictions",
+        )
+        prediction_staged = _snapshot_core(prediction_snapshot)
+        prediction_identity = {**prediction_staged, "path": str(prediction_path)}
+        training_config = _training_config(seed, recipe)
+        preprocessing = _preprocessing_contract()
+        bindings: dict[str, object] = {
+            "training_seed": seed,
+            "source_commit": repository["commit"],
+            "source_clean_worktree": True,
+            "upstream_source_sha256": repository["dinknet_source"]["sha256"],
+            "adapter_source_sha256": closure_sources["adapter"]["sha256"],
+            "train_sha256": train_artifact["sha256"],
+            "validation_sha256": validation_artifact["sha256"],
+            "imagenet_weights_sha256": weights["sha256"],
+            "dependency_closure_sha256": _canonical_object_sha256(closure),
+            "checkpoint_sha256": checkpoint_artifact["sha256"],
+            "observations_sha256": test.provenance["sha256"],
+            "prediction_sha256": prediction_staged["sha256"],
         }
-        prediction_identity = {
-            **prediction_staged,
-            "path": str(prediction_path),
-        }
-
+        if "cli_runner" in closure_sources:
+            bindings["runner_source_sha256"] = closure_sources["cli_runner"]["sha256"]
         finished_at = datetime.now(UTC)
         runtime = {
             "schema": RUNTIME_SCHEMA,
             "schema_version": RUNTIME_SCHEMA_VERSION,
             "method": "MTDLPy/DinkNet50",
             "track": "common-retrain",
+            "operation": "inference_from_reusable_checkpoint",
             "comparison_status": "unscored_prediction_artifact",
             "ranking_allowed": False,
             "seed": seed,
@@ -1333,17 +2445,33 @@ def run_common_retrain(
                 "tf32": False,
                 "data_loader_workers": 0,
             },
-            "training_summary": dict(outcome.training_summary),
+            "training_summary": dict(checkpoint_state["training_summary"]),
             "runtime": dict(outcome.runtime),
+            "dependency_closure": closure,
+            "bindings": bindings,
+            "truth_keys_accepted": False,
+            "contains_truth": False,
             "observation_contract": {
                 "schema": OBSERVATION_SCHEMA,
                 "schema_version": PAYLOAD_SCHEMA_VERSION,
+                "observations_sha256": test.provenance["sha256"],
                 "truth_keys_accepted": False,
+                "contains_truth": False,
                 "sample_count": int(test.sample_index.size),
                 "sample_index_sha256": hashlib.sha256(
                     np.asarray(test.sample_index, dtype="<i8").tobytes()
                 ).hexdigest(),
                 "evaluation_floor_role": "scorer_only_not_model_input",
+            },
+            "checkpoint_contract": {
+                "schema": CHECKPOINT_SCHEMA,
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "safe_load": "torch.load(weights_only=True)",
+                "seed": seed,
+                "recipe_id": recipe.recipe_id,
+                "contains_truth": False,
+                "contains_observation_campaign": False,
+                "dataset_identities": checkpoint_state["dataset_identities"],
             },
             "prediction_contract": {
                 "schema": PREDICTION_SCHEMA,
@@ -1358,34 +2486,60 @@ def run_common_retrain(
                 "prediction_shape": list(predictions.shape),
                 "prediction_axis_order": ["sample", "depth", "x"],
                 "prediction_unit": "log10_ohm_m",
+                "truth_keys_accepted": False,
                 "contains_truth": False,
             },
             "outputs": {
-                "checkpoint": checkpoint_identity,
+                "checkpoint": dict(checkpoint_artifact),
                 "predictions": prediction_identity,
             },
         }
+        _require_no_prescore_metadata(runtime, where="MTDLPy inference runtime")
         for role, artifact in source_artifacts.items():
             require_file_artifact_unchanged(_artifact_core(artifact), role=role)
         require_file_artifact_unchanged(
-            checkpoint_staged, role="staged checkpoint"
+            checkpoint_artifact, role="MTDLPy reusable checkpoint"
         )
         require_file_artifact_unchanged(
-            prediction_staged, role="staged predictions"
+            prediction_staged, role="staged MTDLPy predictions"
         )
         if verify_pinned_repository(repository_path) != repository:
             raise MTDLPyAdapterError(
-                "pinned MTDLPy repository changed before publication"
+                "pinned MTDLPy repository changed before inference publication"
             )
         runtime_payload = _canonical_json_bytes(runtime)
-        _write_bytes_new(runtime_part, runtime_payload)
-        if runtime_part.read_bytes() != runtime_payload:
-            raise MTDLPyAdapterError("staged runtime metadata changed after writing")
-        _publish_parts(parts, destinations)
+        owned_parts[runtime_part] = _write_bytes_new(runtime_part, runtime_payload)
+        runtime_snapshot = _snapshot_regular_file(
+            runtime_part, role="staged MTDLPy inference runtime"
+        )
+        _require_owned_snapshot(
+            runtime_snapshot,
+            owned_parts[runtime_part],
+            role="staged MTDLPy inference runtime",
+        )
+        if runtime_snapshot.payload != runtime_payload:
+            raise MTDLPyAdapterError("staged inference runtime changed after writing")
+        for role, artifact in source_artifacts.items():
+            require_file_artifact_unchanged(_artifact_core(artifact), role=role)
+        require_file_artifact_unchanged(
+            checkpoint_artifact, role="MTDLPy reusable checkpoint"
+        )
+        require_file_artifact_unchanged(
+            prediction_staged, role="staged MTDLPy predictions"
+        )
+        if verify_pinned_repository(repository_path) != repository:
+            raise MTDLPyAdapterError(
+                "pinned MTDLPy repository changed during runtime staging"
+            )
+        _publish_parts(
+            parts,
+            destinations,
+            expected_snapshots=(prediction_snapshot, runtime_snapshot),
+        )
         return runtime
     finally:
-        for part in parts:
-            part.unlink(missing_ok=True)
+        for part, identity in owned_parts.items():
+            _remove_owned_part(part, identity)
 
 
 __all__ = [
@@ -1395,13 +2549,16 @@ __all__ = [
     "TRAINING_RECIPES",
     "UPSTREAM_CONFIG_RECIPE",
     "HeldoutObservations",
+    "InferenceOutcome",
     "MTDLPyAdapterError",
+    "TrainingOutcome",
     "TrainingRecipe",
     "TrainingSplit",
+    "infer_common_retrain",
     "load_heldout_observations",
     "load_training_split",
     "resize_bilinear_half_pixel",
-    "run_common_retrain",
+    "train_common_retrain",
     "training_recipe",
     "validate_local_imagenet_weights",
     "verify_pinned_repository",
