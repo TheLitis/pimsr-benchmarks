@@ -278,13 +278,28 @@ def test_cpu_inference_emits_evaluator_prediction_and_runtime(tmp_path: Path):
     assert np.isfinite(predictions.log10_resistivity).all()
     report = json.loads(runtime.read_text(encoding="utf-8"))
     assert report["schema"] == RUNTIME_SCHEMA
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
+    assert report["operation"] == "inference_from_reusable_checkpoint"
+    assert report["ranking_allowed"] is False
+    assert report["truth_keys_accepted"] is False
+    assert report["contains_truth"] is False
+    assert report["heldout_truth_available_to_adapter"] is False
     assert report["training_seed"] == 101
+    assert report["adapter_source"]["sha256"] == hashlib.sha256(
+        Path(pimsr2d_adapter.__file__).read_bytes()
+    ).hexdigest()
     assert report["inputs"]["observations"]["sha256"] == expected_observations
     assert report["inputs"]["observations"]["schema_version"] == 1
     assert report["inputs"]["checkpoint"]["sha256"] == expected_checkpoint
     assert report["output"]["sha256"] == result.prediction_sha256
     assert report["output"]["schema_version"] == 2
+    assert report["training_contract"]["training_config"]["seed"] == 101
+    assert report["training_contract"]["train_dataset"]["sha256"] == "a" * 64
+    assert report["training_contract"]["validation_dataset"]["sha256"] == "b" * 64
+    assert report["checkpoint_contract"]["contains_observation_campaign"] is False
+    assert report["checkpoint_contract"]["safe_load"] == "torch.load(weights_only=True)"
+    assert report["observation_contract"]["truth_keys_accepted"] is False
+    assert report["prediction_contract"]["contains_truth"] is False
     assert report["execution"]["device_resolved"] == "cpu"
     assert report["execution"]["precision"] == "float32"
     assert report["execution"]["peak_cuda_memory_bytes"] is None

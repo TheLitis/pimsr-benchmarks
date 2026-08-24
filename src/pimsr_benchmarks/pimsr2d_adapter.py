@@ -36,7 +36,7 @@ PREDICTION_SCHEMA = "pimsr-sota-2d-predictions"
 RUNTIME_SCHEMA = "pimsr-sota-2d-pimsr-runtime"
 OBSERVATION_SCHEMA_VERSION = 1
 PREDICTION_SCHEMA_VERSION = 2
-RUNTIME_SCHEMA_VERSION = 2
+RUNTIME_SCHEMA_VERSION = 3
 CHECKPOINT_SCHEMA = "pimsr-train-2d"
 CHECKPOINT_SCHEMA_VERSION = 1
 
@@ -1250,11 +1250,23 @@ def run_pimsr2d_inference(
 
         wall_seconds = time.perf_counter() - wall_started
         state = checkpoint.state
+        adapter_source = _snapshot(
+            Path(__file__).resolve(strict=True),
+            expected_sha256=None,
+            role="pimsr2d_adapter_source",
+        )
         runtime = {
             "schema": RUNTIME_SCHEMA,
             "schema_version": RUNTIME_SCHEMA_VERSION,
             "method": "pimsr-2d",
+            "operation": "inference_from_reusable_checkpoint",
+            "comparison_status": "unscored_prediction_artifact",
+            "ranking_allowed": False,
             "training_seed": int(state["training_config"]["seed"]),
+            "adapter_source": {
+                "sha256": adapter_source.sha256,
+                "size_bytes": adapter_source.size_bytes,
+            },
             "inputs": {
                 "observations": {
                     "schema": OBSERVATION_SCHEMA,
@@ -1286,6 +1298,78 @@ def run_pimsr2d_inference(
                 "sha256": prediction_snapshot.sha256,
                 "size_bytes": prediction_snapshot.size_bytes,
             },
+            "training_contract": {
+                "train_dataset": {
+                    "sha256": state["dataset_identities"]["train"][
+                        "artifact_sha256"
+                    ],
+                    "size_bytes": int(
+                        state["dataset_identities"]["train"][
+                            "artifact_size_bytes"
+                        ]
+                    ),
+                },
+                "training_config": dict(state["training_config"]),
+                "validation_dataset": {
+                    "sha256": state["dataset_identities"]["val"][
+                        "artifact_sha256"
+                    ],
+                    "size_bytes": int(
+                        state["dataset_identities"]["val"][
+                            "artifact_size_bytes"
+                        ]
+                    ),
+                },
+            },
+            "checkpoint_contract": {
+                "schema": CHECKPOINT_SCHEMA,
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "safe_load": "torch.load(weights_only=True)",
+                "seed": int(state["training_config"]["seed"]),
+                "contains_observation_campaign": False,
+                "truth_keys_accepted": False,
+                "contains_truth": False,
+                "dataset_identities": {
+                    "train": {
+                        "sha256": state["dataset_identities"]["train"][
+                            "artifact_sha256"
+                        ],
+                        "size_bytes": int(
+                            state["dataset_identities"]["train"][
+                                "artifact_size_bytes"
+                            ]
+                        ),
+                    },
+                    "validation": {
+                        "sha256": state["dataset_identities"]["val"][
+                            "artifact_sha256"
+                        ],
+                        "size_bytes": int(
+                            state["dataset_identities"]["val"][
+                                "artifact_size_bytes"
+                            ]
+                        ),
+                    },
+                },
+                "checkpoint_sha256": checkpoint.artifact_sha256,
+            },
+            "observation_contract": {
+                "schema": OBSERVATION_SCHEMA,
+                "schema_version": OBSERVATION_SCHEMA_VERSION,
+                "observations_sha256": observations.artifact_sha256,
+                "sample_count": int(observations.sample_index.size),
+                "truth_keys_accepted": False,
+                "contains_truth": False,
+                "evaluation_floor_role": "scorer_only_not_model_input",
+            },
+            "prediction_contract": {
+                "schema": PREDICTION_SCHEMA,
+                "schema_version": PREDICTION_SCHEMA_VERSION,
+                "observations_sha256": observations.artifact_sha256,
+                "prediction_sha256": prediction_snapshot.sha256,
+                "truth_keys_accepted": False,
+                "contains_truth": False,
+            },
             "execution": {
                 "batch_size": batch,
                 "device_requested": device,
@@ -1310,6 +1394,9 @@ def run_pimsr2d_inference(
                 "cudnn": torch.backends.cudnn.version(),
             },
             "source": source,
+            "truth_keys_accepted": False,
+            "contains_truth": False,
+            "heldout_truth_available_to_adapter": False,
         }
         runtime_payload = _canonical_json_bytes(runtime)
         _write_bytes(parts[1], runtime_payload)
