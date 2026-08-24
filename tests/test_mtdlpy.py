@@ -275,13 +275,45 @@ def test_fixed_half_pixel_resize_is_deterministic_and_rejects_nonfinite():
 
 
 def test_observation_preprocessing_matches_upstream_resize_then_transpose():
-    source = np.arange(8 * 12, dtype=np.float32).reshape(1, 1, 8, 12)
-    resized = resize_bilinear_half_pixel(source, mtdlpy.NETWORK_GRID_SHAPE)
+    source = np.empty((1, 4, 8, 12), dtype=np.float32)
+    base = np.arange(8 * 12, dtype=np.float32).reshape(1, 8, 12) / 100.0
+    source[:, 0] = base
+    source[:, 1] = 20.0 + base
+    source[:, 2] = 1.0 + base
+    source[:, 3] = 40.0 + base
+    expected = np.empty((1, 4, *mtdlpy.NETWORK_GRID_SHAPE), dtype=np.float32)
+    for channel in (0, 2):
+        expected[:, channel] = np.log10(
+            resize_bilinear_half_pixel(
+                np.power(10.0, source[:, channel]), mtdlpy.NETWORK_GRID_SHAPE
+            )
+        )
+    for channel in (1, 3):
+        expected[:, channel] = resize_bilinear_half_pixel(
+            source[:, channel], mtdlpy.NETWORK_GRID_SHAPE
+        )
 
     transformed = mtdlpy._preprocess_observations(source)
 
-    np.testing.assert_array_equal(transformed, np.swapaxes(resized, -2, -1))
-    assert not np.array_equal(transformed, resized)
+    np.testing.assert_allclose(
+        transformed, np.swapaxes(expected, -2, -1), rtol=1e-6, atol=1e-6
+    )
+    naive_log_resize = np.swapaxes(
+        resize_bilinear_half_pixel(source, mtdlpy.NETWORK_GRID_SHAPE), -2, -1
+    )
+    assert not np.array_equal(transformed[:, 0], naive_log_resize[:, 0])
+    assert not np.array_equal(transformed, expected)
+
+
+def test_log10_resistivity_resize_operates_in_linear_scale():
+    source = np.asarray([[0.0, 2.0]], dtype=np.float32)
+
+    resized = mtdlpy._resize_log10_resistivity(source, (1, 3))
+
+    np.testing.assert_allclose(resized, [[0.0, np.log10(50.5), 2.0]])
+    assert resized[0, 1] != pytest.approx(1.0)
+    with pytest.raises(MTDLPyAdapterError, match="positive linear values"):
+        mtdlpy._resize_log10_resistivity(np.asarray([[-400.0]]), (1, 1))
 
 
 def _split(path: Path, start: int, *, generator_seed: int = 91) -> TrainingSplit:
@@ -449,9 +481,19 @@ def test_common_retrain_publishes_exact_prediction_contract_and_runtime(
     assert published["training_config"]["normalization"] == "none"
     assert published["preprocessing"]["test_tuning"] is False
     assert published["preprocessing"]["transpose_observations"] is True
-    assert published["preprocessing"]["observation_transform_order"] == (
-        "bilinear_resize_then_transpose"
-    )
+    assert published["preprocessing"]["observation_transform_order"] == {
+        "apparent_resistivity": (
+            "pow10_to_linear_then_bilinear_resize_then_log10_then_transpose"
+        ),
+        "phase": "bilinear_resize_then_transpose",
+    }
+    assert "not an MTDLPy upstream default" in published["training_config"][
+        "schedule_origin"
+    ]
+    assert "[0,180)" in published["preprocessing"]["phase_domain_adaptation"]
+    assert "upstream does not define" in published["preprocessing"][
+        "prediction_resize_origin"
+    ]
     assert published["observation_contract"]["truth_keys_accepted"] is False
     assert published["prediction_contract"]["keys_exact"] == list(
         mtdlpy.PREDICTION_KEYS

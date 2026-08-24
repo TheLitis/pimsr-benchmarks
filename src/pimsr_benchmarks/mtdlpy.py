@@ -481,6 +481,8 @@ def load_heldout_observations(path: str | Path) -> HeldoutObservations:
 def resize_bilinear_half_pixel(
     values: np.ndarray,
     output_shape: tuple[int, int],
+    *,
+    _output_dtype: np.dtype[Any] | type[np.floating[Any]] = np.float32,
 ) -> np.ndarray:
     """Deterministic CPU bilinear resize with a fixed half-pixel convention."""
     array = np.asarray(values)
@@ -511,15 +513,63 @@ def resize_bilinear_half_pixel(
     rows += np.take(work, y1, axis=-2) * wy.reshape(row_shape)
     result = np.take(rows, x0, axis=-1) * (1.0 - wx).reshape(col_shape)
     result += np.take(rows, x1, axis=-1) * wx.reshape(col_shape)
-    result = result.astype(np.float32)
+    result = result.astype(_output_dtype)
     if not np.isfinite(result).all():
         raise MTDLPyAdapterError("bilinear preprocessing produced non-finite values")
     return result
 
 
+def _resize_log10_resistivity(
+    values: np.ndarray,
+    output_shape: tuple[int, int],
+) -> np.ndarray:
+    """Match upstream's linear-resistivity resize followed by ``log10``."""
+    log10_values = np.asarray(values, dtype=np.float64)
+    if not np.isfinite(log10_values).all():
+        raise ValueError("log10 resistivity values must be finite")
+    try:
+        with np.errstate(over="raise", under="ignore", invalid="raise"):
+            linear = np.power(10.0, log10_values)
+    except FloatingPointError as exc:
+        raise MTDLPyAdapterError(
+            "log10 resistivity cannot be represented in linear float64"
+        ) from exc
+    if not np.isfinite(linear).all() or np.any(linear <= 0.0):
+        raise MTDLPyAdapterError(
+            "log10 resistivity cannot be represented as positive linear values"
+        )
+    resized = resize_bilinear_half_pixel(
+        linear,
+        output_shape,
+        _output_dtype=np.float64,
+    )
+    result = np.log10(resized).astype(np.float32)
+    if not np.isfinite(result).all():
+        raise MTDLPyAdapterError(
+            "linear-resistivity resize followed by log10 produced non-finite values"
+        )
+    return result
+
+
 def _preprocess_observations(values: np.ndarray) -> np.ndarray:
-    """Match upstream ``ensure_grid_shape(...).T`` on every MT channel."""
-    resized = resize_bilinear_half_pixel(values, NETWORK_GRID_SHAPE)
+    """Match upstream scale-aware resize and final transpose for TE/TM data."""
+    array = np.asarray(values)
+    if array.ndim != 4 or array.shape[1] != len(OBSERVATION_CHANNEL_ORDER):
+        raise MTDLPyAdapterError(
+            "MTDLPy observations must have sample, four-channel, frequency, station axes"
+        )
+    resized = np.empty(
+        (array.shape[0], array.shape[1], *NETWORK_GRID_SHAPE),
+        dtype=np.float32,
+    )
+    for channel in (0, 2):
+        resized[:, channel] = _resize_log10_resistivity(
+            array[:, channel], NETWORK_GRID_SHAPE
+        )
+    for channel in (1, 3):
+        resized[:, channel] = resize_bilinear_half_pixel(
+            array[:, channel], NETWORK_GRID_SHAPE
+        )
     return np.ascontiguousarray(np.swapaxes(resized, -2, -1), dtype=np.float32)
 
 
@@ -667,8 +717,10 @@ def _train_and_predict(
     observations_train = _preprocess_observations(train.observations)
     observations_validation = _preprocess_observations(validation.observations)
     observations_test = _preprocess_observations(test.observations)
-    targets_train = resize_bilinear_half_pixel(train.targets, NETWORK_GRID_SHAPE)
-    targets_validation = resize_bilinear_half_pixel(
+    targets_train = _resize_log10_resistivity(
+        train.targets, NETWORK_GRID_SHAPE
+    )
+    targets_validation = _resize_log10_resistivity(
         validation.targets, NETWORK_GRID_SHAPE
     )
     preprocessing_wall_time_s = time.perf_counter() - preprocessing_start
@@ -802,7 +854,7 @@ def _train_and_predict(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     inference_wall_time_s = time.perf_counter() - inference_start
-    predictions = resize_bilinear_half_pixel(
+    predictions = _resize_log10_resistivity(
         np.concatenate(prediction_batches, axis=0), OUTPUT_GRID_SHAPE
     )
 
@@ -1096,18 +1148,38 @@ def run_common_retrain(
         "loss": "mean_squared_error_mean",
         "checkpoint_selection": "lowest validation MSE; strict less-than; first tie",
         "normalization": "none",
+        "schedule_origin": (
+            "preregistered benchmark-native reviewed adapter schedule; "
+            "not an MTDLPy upstream default"
+        ),
     }
     preprocessing = {
         "input_channel_order": list(OBSERVATION_CHANNEL_ORDER),
         "observation_axis_order": ["sample", "channel", "frequency", "station"],
         "network_spatial_axis_order": ["station_resampled", "frequency_resampled"],
         "transpose_observations": True,
-        "observation_transform_order": "bilinear_resize_then_transpose",
+        "observation_transform_order": {
+            "apparent_resistivity": (
+                "pow10_to_linear_then_bilinear_resize_then_log10_then_transpose"
+            ),
+            "phase": "bilinear_resize_then_transpose",
+        },
         "input_units": ["log10_ohm_m", "degree", "log10_ohm_m", "degree"],
         "observation_resize": "8x12_to_32x32",
-        "training_target_resize": "64x48_to_32x32",
+        "observation_resize_origin": (
+            "benchmark-native geometry adaptation preserving upstream transform order"
+        ),
+        "training_target_resize": (
+            "pow10_to_linear_then_64x48_to_32x32_then_log10"
+        ),
         "training_target_axis_order": ["sample", "depth", "x"],
-        "prediction_resize": "32x32_to_64x48",
+        "prediction_resize": (
+            "pow10_to_linear_then_32x32_to_64x48_then_log10"
+        ),
+        "prediction_resize_origin": (
+            "benchmark-native evaluation-grid adaptation; upstream does not define "
+            "this inverse regridding"
+        ),
         "interpolation": {
             "kind": "bilinear",
             "coordinate_transform": "half_pixel",
@@ -1117,6 +1189,11 @@ def run_common_retrain(
             "antialias": False,
         },
         "missing_data_policy": "reject_if_valid_mask_is_not_all_true",
+        "phase_domain_adaptation": (
+            "retain benchmark canonical [0,180) phases; do not apply the upstream "
+            "loader's [0,90] sample rejection"
+        ),
+        "upstream_pipeline_claim": "semantic preprocessing order only, not byte-exact",
         "test_tuning": False,
         "evaluation_floors_used_as_model_input": False,
     }
