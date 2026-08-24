@@ -34,7 +34,7 @@ LINEAGE_SCHEMA = "pimsr-public-dataset-lineage-2d"
 LINEAGE_SCHEMA_VERSION = 2
 SHARD_PINS_SCHEMA = "pimsr-public-dataset-shard-pins-2d"
 SHARD_PINS_SCHEMA_VERSION = 1
-EVIDENCE_SCOPE = "artifact_lineage_and_source_identity_without_forward_regeneration"
+EVIDENCE_SCOPE = "artifact_lineage_and_transitive_generator_source_identity_without_forward_regeneration"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")

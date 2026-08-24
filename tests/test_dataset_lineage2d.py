@@ -307,7 +307,7 @@ def test_builds_canonical_exact_lineage_without_regeneration(case: dict[str, Any
     assert manifest["schema"] == lineage.LINEAGE_SCHEMA
     assert manifest["schema_version"] == 2
     assert manifest["evidence_scope"] == (
-        "artifact_lineage_and_source_identity_without_forward_regeneration"
+        "artifact_lineage_and_transitive_generator_source_identity_without_forward_regeneration"
     )
     assert manifest["verification"]["forward_regeneration_performed"] is False
     assert manifest["verification"]["generation_time_execution_proven"] is False
