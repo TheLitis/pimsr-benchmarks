@@ -50,6 +50,8 @@ def test_repository_registry_is_valid_and_complete():
         "mt2d_autodiff",
         "mt_mamba",
         "p_physinv",
+        "pgwnet",
+        "pdi_tunet",
         "mt2dinv_unet",
         "mt3d_net",
         "mt1d_inr",
@@ -72,7 +74,7 @@ def test_repository_registry_is_valid_and_complete():
 def test_registry_cli_reports_valid_summary(capsys):
     assert main([str(REGISTRY_PATH)]) == 0
     assert capsys.readouterr().out.strip() == (
-        "valid pimsr-sota-methods schema=2 methods=23 datasets=7"
+        "valid pimsr-sota-methods schema=2 methods=25 datasets=7"
     )
 
 
@@ -288,7 +290,7 @@ def test_registry_does_not_overstate_dense_or_gemmie_artifacts(registry):
 
 def test_recent_2d_methods_without_reproduction_bundles_stay_paper_only(registry):
     methods = {method["id"]: method for method in registry["methods"]}
-    for method_id in ("mffd_unet", "mt2d_autodiff"):
+    for method_id in ("mffd_unet", "mt2d_autodiff", "pgwnet", "pdi_tunet"):
         method = methods[method_id]
         assert method["status"] == "paper_only"
         assert method["tracks"] == []

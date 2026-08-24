@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "registry_id": "pimsr-sota-methods",
-  "as_of_date": "2026-08-24",
+  "as_of_date": "2026-08-25",
   "protocol_document": "docs/SOTA_PROTOCOL.md",
   "methods": [
     {
@@ -703,6 +703,71 @@
       },
       "caveats": [
         "Paper-reported metrics are context only until source, weights, preprocessing and evaluation data become independently runnable."
+      ]
+    },
+    {
+      "id": "pgwnet",
+      "name": "PGWNet",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Multitask Learning-Driven Physics-Guided Deep Learning Magnetotelluric Inversion",
+          "doi": "10.1109/TGRS.2024.3457893",
+          "url": "https://doi.org/10.1109/TGRS.2024.3457893"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable source, checkpoint and preprocessing bundle was identified for the published multitask physics-guided method."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "The paper-reported model- and data-misfit results remain contextual until PGWNet can be executed from an immutable author-provided bundle."
+      ]
+    },
+    {
+      "id": "pdi_tunet",
+      "name": "PDI-TUNet",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Magnetotelluric Inversion Using Dual-Channel Deep Learning With Physical Information Constraints: TM Case",
+          "doi": "10.1109/TGRS.2025.3612583",
+          "url": "https://doi.org/10.1109/TGRS.2025.3612583"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable PDI-TUNet source, checkpoint and exact preprocessing bundle was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "No external software artifact was identified, so no software license could be verified."
+      },
+      "caveats": [
+        "The published experiment is TM-only and is not commensurate with the four-channel TE/TM common-retrain track.",
+        "Paper-reported results remain on the shadow board until an immutable executable bundle is available."
       ]
     },
     {

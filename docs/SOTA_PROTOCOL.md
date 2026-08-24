@@ -42,9 +42,10 @@ notebook in 1D; RDON, MT2DInv-DenseNet, MTDLPy and MARE2DEM in 2D; and ModEM,
 MT3D_CNN, GEMMIE, FEMTIC and the public DEVA3DMT research edition in 3D. SimPEG
 is a numerical reference, not a learned-SOTA claim. Res-FormerNet, the 2D INR
 abstract, MFFD-UNet, the 2D automatic-differentiation method, MT-Mamba,
-P-PhysInv, MT2DInv-Unet, MT3D-Net, the 1D implicit-neural-representation
-preprint and the trans-scale 2D method remain paper-only until an independent
-source/checkpoint or reproduction bundle can be pinned and executed.
+P-PhysInv, PGWNet, PDI-TUNet, MT2DInv-Unet, MT3D-Net, the 1D
+implicit-neural-representation preprint and the trans-scale 2D method remain
+paper-only until an independent source/checkpoint or reproduction bundle can
+be pinned and executed.
 
 Artifact availability is track-specific. In particular, the DenseNet v1.2
 Zenodo record contains source scripts but no released training data or weights,
