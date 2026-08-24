@@ -891,7 +891,10 @@ def parse_modem_response(
     conjugated.
     """
     response_snapshot = snapshot_file(path, role="ModEM forward response")
-    text = response_snapshot.path.read_text(encoding="ascii")
+    try:
+        text = response_snapshot.payload.decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("ModEM forward response must be strict ASCII") from exc
     lines = text.splitlines()
     expected_station_y = (
         0.5 * sum(mesh.cell_widths(truth.depth_centres_m)[0]) + truth.station_x_m

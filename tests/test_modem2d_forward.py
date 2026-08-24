@@ -270,6 +270,42 @@ def test_parser_consumes_plus_iwt_directly_and_returns_canonical_modes(
     assert record["canonical_mode_order"] == ["TE_Zyx", "TM_Zxy"]
 
 
+def test_parser_uses_pinned_snapshot_bytes_during_a_b_swap(
+    tmp_path: Path,
+    truth: modem.CanonicalTruth,
+    small_mesh: modem.MeshConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    output = tmp_path / "forward.dat"
+    original_payload = _response_text(truth, small_mesh).encode("ascii")
+    output.write_bytes(original_payload)
+    saved = tmp_path / "forward.saved"
+    replacement = tmp_path / "forward.replacement"
+    replacement.write_bytes(b"not a ModEM response\n")
+    real_snapshot = modem.snapshot_file
+    calls = 0
+
+    def swapping_snapshot(path: Path, *, role: str):
+        nonlocal calls
+        if calls == 0:
+            snapshot = real_snapshot(path, role=role)
+            Path(path).replace(saved)
+            replacement.replace(path)
+            calls += 1
+            return snapshot
+        Path(path).unlink()
+        saved.replace(path)
+        calls += 1
+        return real_snapshot(path, role=role)
+
+    monkeypatch.setattr(modem, "snapshot_file", swapping_snapshot)
+
+    response, _record = modem.parse_modem_response(output, truth, small_mesh)
+
+    assert calls == 2
+    assert np.allclose(response.log10_rho_te, 2.0, atol=2e-8)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     (({"omit_last_tm": True}, "exactly 96"), ({"nonfinite": True}, "non-finite")),
