@@ -42,6 +42,8 @@ PUBLIC_FORWARD_CONTRACT = "pimsr-forward.MT2DForward/default-mesh/v2"
 SCENARIO_NAMES = ("background", "aquifer", "hydrocarbon", "salt", "geothermal")
 PRODUCTION_MESH = MESH_CONFIGS["nested-production-v1"]
 NEXT_FINER_REFERENCE = MESH_CONFIGS["nested-reference-x2-v1"]
+RAW_RUN_SET_SCHEMA = "pimsr-modem2d-public-convergence-raw-run-set"
+RAW_RUN_SET_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -356,7 +358,60 @@ def _file_identity(path: Path) -> dict[str, object]:
     return snapshot_file(path, role="validation case artifact").record()
 
 
-def validate(args: argparse.Namespace) -> tuple[dict[str, object], bytes]:
+def _bundle_raw_run(
+    *,
+    ordinal: int,
+    case_id: str,
+    case_kind: str,
+    sample_index: int | None,
+    truth_id: str,
+    role: str,
+    mesh_id: str,
+    output_dir: Path,
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    prefix = f"raw-{ordinal:03d}"
+    forward_name = f"{prefix}-forward.dat"
+    provenance_name = f"{prefix}-provenance.json"
+    forward = snapshot_file(
+        output_dir / "forward.dat", role=f"raw run {ordinal} ModEM response"
+    )
+    provenance = snapshot_file(
+        output_dir / "provenance.json", role=f"raw run {ordinal} provenance"
+    )
+    run = {
+        "case_id": case_id,
+        "case_kind": case_kind,
+        "sample_index": sample_index,
+        "truth_id": truth_id,
+        "role": role,
+        "mesh_id": mesh_id,
+        "forward": {
+            "path": forward_name,
+            "sha256": forward.sha256,
+            "size_bytes": forward.size_bytes,
+        },
+        "provenance": {
+            "path": provenance_name,
+            "sha256": provenance.sha256,
+            "size_bytes": provenance.size_bytes,
+        },
+    }
+    require_snapshot_unchanged(forward, role=f"raw run {ordinal} ModEM response")
+    require_snapshot_unchanged(provenance, role=f"raw run {ordinal} provenance")
+    return run, {
+        forward_name: forward.payload,
+        provenance_name: provenance.payload,
+    }
+
+
+def validate(
+    args: argparse.Namespace,
+) -> tuple[
+    dict[str, object],
+    bytes,
+    dict[str, object],
+    dict[str, bytes],
+]:
     validator_snapshot = snapshot_file(__file__, role="convergence validator source")
     bridge_snapshot = snapshot_file(
         Path(__file__).resolve().parents[1]
@@ -507,12 +562,13 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, object], bytes]:
         _make_layered_truth(base_truth),
     )
     analytic_records: list[dict[str, object]] = []
+    analytic_cases: list[CaseResult] = []
     for analytic_truth in analytic_truths:
         for role, mesh in (
             ("production-candidate", PRODUCTION_MESH),
             ("next-finer-reference", NEXT_FINER_REFERENCE),
         ):
-            _case, record = _run_analytic_case(
+            analytic_case, record = _run_analytic_case(
                 runtime=runtime,
                 truth=analytic_truth,
                 mesh=mesh,
@@ -521,6 +577,7 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, object], bytes]:
                 timeout_seconds=args.timeout_seconds,
                 validator_source=validator_record,
             )
+            analytic_cases.append(analytic_case)
             analytic_records.append(record)
 
     first = selected[0]
@@ -639,10 +696,67 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, object], bytes]:
             )
         ),
     }
+    raw_runs: list[dict[str, object]] = []
+    raw_artifacts: dict[str, bytes] = {}
+    ordinal = 0
+    for selection in selected:
+        for role in (
+            "production-candidate",
+            "next-finer-reference",
+            "padding-perturbation",
+        ):
+            case = cases[(selection.sample_index, role)]
+            run, artifacts = _bundle_raw_run(
+                ordinal=ordinal,
+                case_id=f"public:{selection.sample_index}:{role}",
+                case_kind="public_geology",
+                sample_index=selection.sample_index,
+                truth_id=f"sample-{selection.sample_index:06d}",
+                role=role,
+                mesh_id=case.mesh.mesh_id,
+                output_dir=case.output_dir,
+            )
+            raw_runs.append(run)
+            raw_artifacts.update(artifacts)
+            ordinal += 1
+    for case in analytic_cases:
+        truth_id = case.selection.scenario_name
+        run, artifacts = _bundle_raw_run(
+            ordinal=ordinal,
+            case_id=f"analytic:{truth_id}:{case.role}",
+            case_kind="analytic",
+            sample_index=None,
+            truth_id=truth_id,
+            role=case.role,
+            mesh_id=case.mesh.mesh_id,
+            output_dir=case.output_dir,
+        )
+        raw_runs.append(run)
+        raw_artifacts.update(artifacts)
+        ordinal += 1
+    repeat_run, repeat_artifacts = _bundle_raw_run(
+        ordinal=ordinal,
+        case_id=f"determinism:{first.sample_index}:repeat",
+        case_kind="determinism_repeat",
+        sample_index=first.sample_index,
+        truth_id=f"sample-{first.sample_index:06d}",
+        role="determinism-repeat",
+        mesh_id=PRODUCTION_MESH.mesh_id,
+        output_dir=repeat_published,
+    )
+    raw_runs.append(repeat_run)
+    raw_artifacts.update(repeat_artifacts)
+    if len(raw_runs) != 80 or len(raw_artifacts) != 160:
+        raise RuntimeError("public convergence raw bundle must contain 80 exact runs")
+    raw_run_set: dict[str, object] = {
+        "schema": RAW_RUN_SET_SCHEMA,
+        "schema_version": RAW_RUN_SET_SCHEMA_VERSION,
+        "runs": raw_runs,
+    }
     require_snapshot_unchanged(validator_snapshot, role="convergence validator source")
     require_snapshot_unchanged(bridge_snapshot, role="ModEM bridge source")
     runtime.require_unchanged()
-    return report, raw_payload
+    return report, raw_payload, raw_run_set, raw_artifacts
 
 
 def _failure_report(
@@ -669,7 +783,7 @@ def main() -> None:
     started = time.monotonic()
     exit_code = 0
     try:
-        report, raw_payload = validate(args)
+        report, raw_payload, raw_run_set, raw_artifacts = validate(args)
         if not bool(report["passed"]):
             exit_code = 2
     except BaseException as error:  # noqa: BLE001 - failure report must include interrupts
@@ -680,14 +794,25 @@ def main() -> None:
                 "error_type": np.asarray(type(error).__name__),
             }
         )
+        raw_run_set = {
+            "schema": RAW_RUN_SET_SCHEMA,
+            "schema_version": RAW_RUN_SET_SCHEMA_VERSION,
+            "runs": [],
+        }
+        raw_artifacts = {}
         exit_code = 2
     report_payload = (
         json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
     ).encode("utf-8")
+    raw_run_set_payload = (
+        json.dumps(raw_run_set, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
     publish_artifact_bundle(
         args.report_dir,
         {
+            **raw_artifacts,
             "paired-residuals.npz": raw_payload,
+            "public-convergence-raw-runs.json": raw_run_set_payload,
             "convergence-report.json": report_payload,
         },
         manifest_name="convergence-report.json",
