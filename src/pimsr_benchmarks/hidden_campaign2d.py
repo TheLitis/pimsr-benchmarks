@@ -620,13 +620,57 @@ def _installed_distribution_roots() -> tuple[tuple[str, Path], ...]:
     return tuple(roots)
 
 
+def _snapshot_python_executable() -> ArtifactSnapshot:
+    """Hash the real interpreter while proving the launcher target stayed fixed."""
+    requested = Path(sys.executable)
+    try:
+        launcher = os.lstat(requested)
+        before = os.stat(requested, follow_symlinks=True)
+        resolved = requested.resolve(strict=True)
+    except OSError as exc:
+        raise HiddenCampaign2DError(
+            f"cannot resolve hidden generation Python executable: {requested}"
+        ) from exc
+    if not (
+        stat.S_ISREG(launcher.st_mode) or stat.S_ISLNK(launcher.st_mode)
+    ):
+        raise HiddenCampaign2DError(
+            "hidden generation Python launcher must be a regular file or symlink"
+        )
+    snapshot = snapshot_file(resolved, role="hidden generation Python executable")
+    try:
+        after = os.stat(requested, follow_symlinks=True)
+    except OSError as exc:
+        raise HiddenCampaign2DError(
+            "hidden generation Python launcher changed after executable capture"
+        ) from exc
+    expected = snapshot.stat_signature
+    before_signature = (
+        int(before.st_dev),
+        int(before.st_ino),
+        int(before.st_size),
+        int(before.st_mtime_ns),
+    )
+    after_signature = (
+        int(after.st_dev),
+        int(after.st_ino),
+        int(after.st_size),
+        int(after.st_mtime_ns),
+    )
+    if before_signature != expected or after_signature != expected:
+        raise HiddenCampaign2DError(
+            "hidden generation Python launcher target changed during capture"
+        )
+    return snapshot
+
+
 def _runtime_manifest_value(source_lineage: Mapping[str, Any]) -> dict[str, Any]:
     versions = _generation_runtime()
     lineage = _strict_source_lineage(source_lineage)
     source_snapshots = _verify_generation_sources(lineage)
     for snapshot in source_snapshots:
         require_snapshot_unchanged(snapshot, role="runtime manifest source closure")
-    executable = snapshot_file(sys.executable, role="hidden generation Python executable")
+    executable = _snapshot_python_executable()
     tree_records: list[dict[str, Any]] = []
     distributions: dict[str, dict[str, str]] = {}
     version_by_package = {

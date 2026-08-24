@@ -582,6 +582,24 @@ def test_runtime_manifest_hashes_ordered_installed_trees(monkeypatch, tmp_path: 
     assert second["tree_manifest_sha256"] != first["tree_manifest_sha256"]
 
 
+def test_runtime_manifest_resolves_stable_python_launcher_symlink(
+    monkeypatch, tmp_path: Path
+):
+    executable = tmp_path / "python-real"
+    executable.write_bytes(b"exact interpreter bytes")
+    launcher = tmp_path / "python"
+    try:
+        launcher.symlink_to(executable)
+    except OSError:
+        pytest.skip("creating symlinks is unavailable")
+    monkeypatch.setattr(hidden_campaign.sys, "executable", str(launcher))
+
+    snapshot = hidden_campaign._snapshot_python_executable()
+
+    assert snapshot.path == executable.resolve(strict=True)
+    assert snapshot.payload == b"exact interpreter bytes"
+
+
 def test_materializer_never_calls_simpeg_forward(monkeypatch, tmp_path: Path):
     geometry, bases = _bases(tmp_path)
     work = tmp_path / "work"
