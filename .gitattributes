@@ -1,1 +1,2 @@
 evidence/public-lineage/*.json -text
+config/sota_2d_common_retrain_prereg.json -text
