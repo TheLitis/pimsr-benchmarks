@@ -1,0 +1,14 @@
+{
+  "pimsr_forward": {
+    "dataset2d_source_sha256": "8c3b651277ed3bd61ffa1419696813e24629f69d083ef461984e57900e40e37f",
+    "repository_commit": "dc36edac75dbd51cc92679a35f38d42d0e276299",
+    "sensors_source_sha256": "96fdac77956d4b31ae5d4e6d92a0b8c2650b9e6e2f67a67e68d808ea59171bd4"
+  },
+  "pimsr_geogen": {
+    "generator_source_sha256": "a175cb659b71c019243058b39ff08b490ddc17464cf69bae76877dc1130009d4",
+    "model_source_sha256": "9d6b97814bc51bc8f775e07150d0e491657b095a9aa41c32d4c4bb808badeb6b",
+    "repository_commit": "91559f817f00cc019ee9d5a7b27b4c68004aa58c",
+    "rock_physics_source_sha256": "88676d1f73c1ec3fa7520f77b59641b1dec1320a0a93a20f787c4ffcd05ca991",
+    "section2d_source_sha256": "88778d3f030260b5dd512589fad308ce78c75adf2ef2584a91a7f23f4f43e7a9"
+  }
+}
