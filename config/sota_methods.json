@@ -503,6 +503,79 @@
       ]
     },
     {
+      "id": "res_formernet",
+      "name": "Res-FormerNet",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Res-FormerNet: A Residual–Transformer Fusion Network for 2-D Magnetotelluric Inversion",
+          "doi": "10.3390/app16010270",
+          "url": "https://doi.org/10.3390/app16010270"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_checkpoint_and_training_data",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "The open-access article describes the architecture and more than 100,000 synthetic training models, but no independently runnable source, checkpoint or exact training dataset was identified."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The article is open access, but no external software artifact was identified and therefore no software license could be verified."
+      },
+      "caveats": [
+        "Keep the method on the paper-only shadow board; its reported scores are not commensurate with the common-retrain benchmark.",
+        "Do not reconstruct an unofficial implementation and label it Res-FormerNet without author-verified source and preprocessing."
+      ]
+    },
+    {
+      "id": "mt2d_inr",
+      "name": "Implicit Neural Representation for 2-D MT Inversion",
+      "dimensionality": ["2d"],
+      "status": "paper_only",
+      "tracks": [],
+      "publications": [
+        {
+          "title": "Implicit neural representation for Magnetotelluric inversion",
+          "doi": "10.5194/egusphere-egu26-15114",
+          "url": "https://doi.org/10.5194/egusphere-egu26-15114"
+        }
+      ],
+      "source": null,
+      "artifacts": [
+        {
+          "kind": "source_and_checkpoint",
+          "availability": "unavailable",
+          "url": null,
+          "immutable_id": null,
+          "caveat": "No independently runnable source or checkpoint artifact was identified."
+        },
+        {
+          "kind": "single_layered_model_example_dataset",
+          "availability": "available",
+          "url": "https://doi.org/10.5281/zenodo.18497702",
+          "immutable_id": "doi:10.5281/zenodo.18497702",
+          "caveat": "The 21.7 kB Zenodo record contains one layered-model example ZIP, not implementation source, a checkpoint or a benchmark training corpus."
+        }
+      ],
+      "license": {
+        "spdx": null,
+        "status": "unknown",
+        "caveat": "The EGU abstract is CC-BY-4.0, while the Zenodo page exposes no machine-readable license for software and no software artifact is present."
+      },
+      "caveats": [
+        "The public artifact is insufficient for an independent inversion run, so the method remains paper-only.",
+        "The conference abstract and example dataset may be cited as context but cannot contribute a reproduced leaderboard score."
+      ]
+    },
+    {
       "id": "mt_mamba",
       "name": "MT-Mamba",
       "dimensionality": ["3d"],

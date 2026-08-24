@@ -369,10 +369,10 @@ def _validate_method(value: Any, index: int) -> str:
             raise _error(f"{path}.source", "paper-only methods require null source")
         if tracks:
             raise _error(f"{path}.tracks", "paper-only methods cannot enter run tracks")
-        if any(item != "unavailable" for item in availability):
+        if not any(item == "unavailable" for item in availability):
             raise _error(
                 f"{path}.artifacts",
-                "paper-only methods may only register unavailable artifacts",
+                "paper-only methods require at least one unavailable execution artifact",
             )
     else:
         if method["source"] is None:

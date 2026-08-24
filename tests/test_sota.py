@@ -44,6 +44,8 @@ def test_repository_registry_is_valid_and_complete():
         "deva3dmt",
         "gan_mt1dinv",
         "guided_1d",
+        "res_formernet",
+        "mt2d_inr",
         "mt_mamba",
         "p_physinv",
         "mt2dinv_unet",
@@ -68,7 +70,7 @@ def test_repository_registry_is_valid_and_complete():
 def test_registry_cli_reports_valid_summary(capsys):
     assert main([str(REGISTRY_PATH)]) == 0
     assert capsys.readouterr().out.strip() == (
-        "valid pimsr-sota-methods schema=2 methods=19 datasets=7"
+        "valid pimsr-sota-methods schema=2 methods=21 datasets=7"
     )
 
 
@@ -201,6 +203,16 @@ def test_paper_only_method_cannot_enter_executable_track(registry):
     method = next(item for item in registry["methods"] if item["id"] == "mt_mamba")
     method["tracks"] = ["frozen_artifact"]
     with pytest.raises(RegistryValidationError, match="paper-only methods cannot"):
+        validate_registry(registry)
+
+
+def test_paper_only_method_may_register_context_data_but_not_only_available_artifacts(
+    registry,
+):
+    method = next(item for item in registry["methods"] if item["id"] == "mt2d_inr")
+    validate_registry(registry)
+    method["artifacts"] = [method["artifacts"][1]]
+    with pytest.raises(RegistryValidationError, match="unavailable execution artifact"):
         validate_registry(registry)
 
 
