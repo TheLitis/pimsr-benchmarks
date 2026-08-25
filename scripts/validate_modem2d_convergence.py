@@ -28,6 +28,7 @@ from pimsr_benchmarks.modem2d_forward import (
     circular_phase_error_deg,
     gate_summary,
     load_canonical_hdf5,
+    parse_modem_response,
     publish_artifact_bundle,
     require_snapshot_unchanged,
     run_modem_forward,
@@ -79,6 +80,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--build-root", type=Path, required=True)
     parser.add_argument("--work-root", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path, required=True)
+    parser.add_argument(
+        "--reuse-public-work-root",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "read-only prior convergence work root whose completed public runs "
+            "may be reused only after exact provenance and artifact validation"
+        ),
+    )
     parser.add_argument(
         "--per-family",
         type=int,
@@ -210,6 +221,154 @@ def _source_for_case(
     }
 
 
+_CACHED_RUN_FILES = frozenset(
+    {
+        "forward.dat",
+        "model.rho",
+        "provenance.json",
+        "responses.npz",
+        "solver.stderr.txt",
+        "solver.stdout.txt",
+        "template.dat",
+    }
+)
+
+
+def _strict_cached_provenance(path: Path) -> tuple[dict[str, object], Any]:
+    snapshot = snapshot_file(path, role="cached ModEM provenance")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+    def reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key is forbidden: {key}")
+            result[key] = value
+        return result
+
+    value = json.loads(
+        snapshot.payload.decode("utf-8", errors="strict"),
+        parse_constant=reject_constant,
+        object_pairs_hook=reject_duplicate_pairs,
+    )
+    if not isinstance(value, dict):
+        raise TypeError("cached ModEM provenance root must be an object")
+    canonical = (
+        json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    ).encode("utf-8")
+    if snapshot.payload != canonical:
+        raise ValueError("cached ModEM provenance is not canonical JSON")
+    return value, snapshot
+
+
+def _historical_public_source_matches(
+    cached: object, expected: dict[str, object]
+) -> bool:
+    if not isinstance(cached, dict):
+        return False
+    cached_copy = dict(cached)
+    expected_copy = dict(expected)
+    cached_validation = cached_copy.pop("public_validation", None)
+    expected_validation = expected_copy.pop("public_validation", None)
+    if not isinstance(cached_validation, dict) or not isinstance(
+        expected_validation, dict
+    ):
+        return False
+    cached_validation = dict(cached_validation)
+    expected_validation = dict(expected_validation)
+    validator = cached_validation.pop("validator_source", None)
+    expected_validation.pop("validator_source", None)
+    if not isinstance(validator, dict) or set(validator) != {
+        "path",
+        "sha256",
+        "size_bytes",
+    }:
+        return False
+    sha256 = validator.get("sha256")
+    if (
+        not isinstance(validator.get("path"), str)
+        or not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(character not in "0123456789abcdef" for character in sha256)
+        or not isinstance(validator.get("size_bytes"), int)
+        or int(validator["size_bytes"]) <= 0
+    ):
+        return False
+    return cached_copy == expected_copy and cached_validation == expected_validation
+
+
+def _load_cached_case(
+    *,
+    cache_root: Path,
+    runtime: Any,
+    truth: CanonicalTruth,
+    selection: PublicSelection,
+    source: dict[str, object],
+    mesh: MeshConfig | NestedMeshConfig,
+    role: str,
+    bridge_identity: dict[str, object],
+) -> CaseResult | None:
+    output = (
+        cache_root / "cases" / f"sample-{selection.sample_index:06d}" / role
+    )
+    if not output.exists():
+        return None
+    if output.is_symlink() or not output.is_dir():
+        raise ValueError(f"cached ModEM run is not a regular directory: {output}")
+    entries = list(output.iterdir())
+    if {entry.name for entry in entries} != _CACHED_RUN_FILES or any(
+        entry.is_symlink() or not entry.is_file() for entry in entries
+    ):
+        raise ValueError(f"cached ModEM run has an unexpected artifact set: {output}")
+    snapshots = {
+        name: snapshot_file(output / name, role=f"cached ModEM artifact {name}")
+        for name in _CACHED_RUN_FILES
+        if name != "provenance.json"
+    }
+    provenance, provenance_snapshot = _strict_cached_provenance(
+        output / "provenance.json"
+    )
+    expected_mesh = {**mesh.canonical_record(), "mesh_config_sha256": mesh.sha256}
+    bridge = provenance.get("bridge_source")
+    expected_bridge = {
+        "sha256": bridge_identity["sha256"],
+        "size_bytes": bridge_identity["size_bytes"],
+    }
+    actual_bridge = (
+        {key: bridge.get(key) for key in expected_bridge}
+        if isinstance(bridge, dict)
+        else None
+    )
+    expected_outputs = {
+        name: {"sha256": snapshot.sha256, "size_bytes": snapshot.size_bytes}
+        for name, snapshot in snapshots.items()
+    }
+    execution = provenance.get("execution")
+    if (
+        provenance.get("schema") != "pimsr-modem2d-forward-run"
+        or provenance.get("schema_version") != 1
+        or provenance.get("truth") != truth.identity_record()
+        or not _historical_public_source_matches(provenance.get("truth_source"), source)
+        or provenance.get("mesh") != expected_mesh
+        or provenance.get("runtime") != runtime.record
+        or provenance.get("runtime_identity_sha256") != runtime.identity_sha256
+        or actual_bridge != expected_bridge
+        or provenance.get("outputs") != expected_outputs
+        or not isinstance(execution, dict)
+        or execution.get("returncode") != 0
+    ):
+        raise ValueError(f"cached ModEM provenance does not match requested run: {output}")
+    response, response_record = parse_modem_response(output / "forward.dat", truth, mesh)
+    if provenance.get("response_contract") != response_record:
+        raise ValueError(f"cached ModEM response contract is inconsistent: {output}")
+    for name, snapshot in snapshots.items():
+        require_snapshot_unchanged(snapshot, role=f"cached ModEM artifact {name}")
+    require_snapshot_unchanged(provenance_snapshot, role="cached ModEM provenance")
+    return CaseResult(selection, role, mesh, output.resolve(), response, provenance)
+
+
 def _run_case(
     *,
     runtime: Any,
@@ -220,7 +379,24 @@ def _run_case(
     role: str,
     work_root: Path,
     timeout_seconds: float,
+    reuse_roots: tuple[Path, ...] = (),
+    bridge_identity: dict[str, object] | None = None,
 ) -> CaseResult:
+    if reuse_roots and bridge_identity is None:
+        raise ValueError("bridge identity is required when cached runs may be reused")
+    for cache_root in reuse_roots:
+        cached = _load_cached_case(
+            cache_root=cache_root,
+            runtime=runtime,
+            truth=truth,
+            selection=selection,
+            source=source,
+            mesh=mesh,
+            role=role,
+            bridge_identity=bridge_identity or {},
+        )
+        if cached is not None:
+            return cached
     output = work_root / "cases" / f"sample-{selection.sample_index:06d}" / role
     published, response, provenance = run_modem_forward(
         runtime=runtime,
@@ -429,6 +605,12 @@ def validate(
         / "modem2d_forward.py",
         role="ModEM bridge source",
     )
+    requested_reuse_roots = tuple(args.reuse_public_work_root)
+    if any(root.is_symlink() or not root.is_dir() for root in requested_reuse_roots):
+        raise ValueError("reuse public work roots must be distinct regular directories")
+    reuse_roots = tuple(root.resolve(strict=True) for root in requested_reuse_roots)
+    if len(set(reuse_roots)) != len(reuse_roots):
+        raise ValueError("reuse public work roots must be distinct regular directories")
     selected, shard_records = select_public_geologies(
         args.public_shard, per_family=args.per_family
     )
@@ -470,9 +652,16 @@ def validate(
             )
         )
     cases: dict[tuple[int, str], CaseResult] = {}
+    task_iterator = iter(tasks)
     with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        future_map = {
-            executor.submit(
+        future_map: dict[Any, tuple[int, str]] = {}
+
+        def submit_next() -> bool:
+            try:
+                selection, truth, source, mesh, role = next(task_iterator)
+            except StopIteration:
+                return False
+            future = executor.submit(
                 _run_case,
                 runtime=runtime,
                 truth=truth,
@@ -482,12 +671,19 @@ def validate(
                 role=role,
                 work_root=work_root,
                 timeout_seconds=args.timeout_seconds,
-            ): (selection.sample_index, role)
-            for selection, truth, source, mesh, role in tasks
-        }
-        for future in as_completed(future_map):
-            key = future_map[future]
+                reuse_roots=reuse_roots,
+                bridge_identity=bridge_snapshot.record(),
+            )
+            future_map[future] = (selection.sample_index, role)
+            return True
+
+        for _ in range(args.jobs):
+            submit_next()
+        while future_map:
+            future = next(as_completed(tuple(future_map)))
+            key = future_map.pop(future)
             cases[key] = future.result()
+            submit_next()
 
     raw: dict[str, np.ndarray] = {
         "sample_index": np.asarray(

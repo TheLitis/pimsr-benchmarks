@@ -1,3 +1,4 @@
+*.py text eol=lf
 evidence/public-lineage/*.json -text
 config/sota_2d_hidden_source_lineage.json -text
 config/sota_2d_common_retrain_prereg.json -text
