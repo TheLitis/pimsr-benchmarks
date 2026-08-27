@@ -36,6 +36,8 @@ from pimsr_benchmarks._publication_io import (
 )
 from pimsr_benchmarks.modem2d_forward import (
     CANONICAL_MODEL_SHAPE,
+    SOLVER_CONTAINER_NAME_RE,
+    SOLVER_ENVIRONMENT,
     CanonicalTruth,
     NestedMeshConfig,
     mapped_model,
@@ -3351,6 +3353,8 @@ def _validate_modem_run_provenance(
     expected_tail = [
         "run",
         "--rm",
+        "--name",
+        None,
         "--network",
         "none",
         "--read-only",
@@ -3359,7 +3363,11 @@ def _validate_modem_run_provenance(
         "--workdir",
         "/tmp",
         "--env",
-        "LD_LIBRARY_PATH=/runtime/lib",
+        SOLVER_ENVIRONMENT[0],
+        "--env",
+        SOLVER_ENVIRONMENT[1],
+        "--env",
+        SOLVER_ENVIRONMENT[2],
         "--mount",
         None,
         "--mount",
@@ -3374,19 +3382,20 @@ def _validate_modem_run_provenance(
         "/output/forward.dat",
     ]
     if (
-        len(command) != 24
+        len(command) != 30
         or not all(isinstance(item, str) and item for item in command)
         or Path(command[0]).name.casefold() not in {"docker", "docker.exe"}
+        or SOLVER_CONTAINER_NAME_RE.fullmatch(command[4]) is None
         or any(
             wanted is not None and command[index + 1] != wanted
             for index, wanted in enumerate(expected_tail)
         )
-        or "target=/runtime" not in command[13]
-        or not command[13].endswith(",readonly")
-        or "target=/input" not in command[15]
-        or not command[15].endswith(",readonly")
-        or "target=/output" not in command[17]
-        or command[17].endswith(",readonly")
+        or "target=/runtime" not in command[19]
+        or not command[19].endswith(",readonly")
+        or "target=/input" not in command[21]
+        or not command[21].endswith(",readonly")
+        or "target=/output" not in command[23]
+        or command[23].endswith(",readonly")
     ):
         raise Comparison2DValidationError(f"{path} execution command is not exact")
     _finite(execution["timeout_seconds"], f"{path}.execution.timeout_seconds")

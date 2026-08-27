@@ -420,12 +420,22 @@ def test_runtime_verifier_binds_commit_tree_tag_clean_and_container(
                 "RepoDigests": [f"ubuntu@{modem.PINNED_CONTAINER_DIGEST}"],
             }
             return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+        if command[1] == "run":
+            linkage = (
+                "liblapack.so.3 => /runtime/lib/liblapack.so.3 (0x1)\n"
+                "libgfortran.so.5 => /runtime/lib/libgfortran.so.5 (0x2)\n"
+                "libgcc_s.so.1 => /runtime/lib/libgcc_s.so.1 (0x3)\n"
+                "libopenblas.so.0 => /runtime/lib/libopenblas.so.0 (0x4)"
+            )
+            return subprocess.CompletedProcess(command, 0, linkage, "")
         return subprocess.CompletedProcess(command, 0, '"29.7.2" "29.7.2"', "")
 
     monkeypatch.setattr(modem, "_run_capture", capture)
     runtime = modem.verify_pinned_runtime(modem_repo=repo, build_root=root)
     assert runtime.record["modem"]["checkout_clean"] is True
     assert runtime.record["container"]["image_id"] == modem.PINNED_CONTAINER_DIGEST
+    assert runtime.runtime_path == root / modem.RUNTIME_DIRECTORY
+    assert runtime.record["runtime_environment"] == list(modem.SOLVER_ENVIRONMENT)
 
 
 def test_runtime_verifier_rejects_dirty_checkout(
@@ -444,6 +454,89 @@ def test_runtime_verifier_rejects_dirty_checkout(
     monkeypatch.setattr(modem, "_git", dirty_git)
     with pytest.raises(modem.ProvenanceError, match="not clean"):
         modem.verify_pinned_runtime(modem_repo=repo, build_root=root)
+
+
+def test_solver_command_pins_openblas_thread_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    input_dir = tmp_path / "input"
+    solver_dir = tmp_path / "solver"
+    runtime_dir = tmp_path / modem.RUNTIME_DIRECTORY
+    input_dir.mkdir()
+    solver_dir.mkdir()
+    runtime_dir.mkdir()
+    captured: list[str] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        captured.extend(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        modem.uuid, "uuid4", lambda: SimpleNamespace(hex="0" * 32)
+    )
+    runtime = SimpleNamespace(docker_executable="docker", runtime_path=runtime_dir)
+    _process, recorded, _elapsed = modem._run_solver(
+        runtime,
+        input_dir=input_dir,
+        solver_dir=solver_dir,
+        timeout_seconds=10.0,
+    )
+
+    assert recorded == captured
+    assert recorded[3:5] == ["--name", f"pimsr-modem2d-{'0' * 32}"]
+    assert recorded[12:18] == [
+        "--env",
+        modem.SOLVER_ENVIRONMENT[0],
+        "--env",
+        modem.SOLVER_ENVIRONMENT[1],
+        "--env",
+        modem.SOLVER_ENVIRONMENT[2],
+    ]
+    assert recorded[19] == (
+        f"type=bind,source={runtime_dir},target=/runtime,readonly"
+    )
+
+
+def test_solver_timeout_removes_named_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    input_dir = tmp_path / "input"
+    solver_dir = tmp_path / "solver"
+    runtime_dir = tmp_path / modem.RUNTIME_DIRECTORY
+    input_dir.mkdir()
+    solver_dir.mkdir()
+    runtime_dir.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(list(command))
+        if command[1] == "run":
+            raise subprocess.TimeoutExpired(command, 1.0)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        modem.uuid, "uuid4", lambda: SimpleNamespace(hex="1" * 32)
+    )
+    runtime = SimpleNamespace(docker_executable="docker", runtime_path=runtime_dir)
+
+    with pytest.raises(TimeoutError, match="exceeded 1 seconds"):
+        modem._run_solver(
+            runtime,
+            input_dir=input_dir,
+            solver_dir=solver_dir,
+            timeout_seconds=1.0,
+        )
+
+    assert calls[-1] == [
+        "docker",
+        "rm",
+        "--force",
+        f"pimsr-modem2d-{'1' * 32}",
+    ]
 
 
 def test_atomic_bundle_no_overwrite_and_manifest_last(tmp_path: Path):

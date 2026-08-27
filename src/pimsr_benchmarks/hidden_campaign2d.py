@@ -48,6 +48,8 @@ from .modem2d_forward import (
     CANONICAL_MODEL_SHAPE,
     CANONICAL_RESPONSE_SHAPE,
     PINNED_CONTAINER_REF,
+    SOLVER_CONTAINER_NAME_RE,
+    SOLVER_ENVIRONMENT,
     ArtifactSnapshot,
     CanonicalTruth,
     ModEMResponse,
@@ -1399,13 +1401,18 @@ def _verify_forward_bundle(
     command = execution.get("command") if isinstance(execution, Mapping) else None
     command_valid = (
         isinstance(command, list)
-        and len(command) == 24
+        and len(command) == 30
         and all(isinstance(value, str) for value in command)
-        and command[:13]
+        and command[:4]
         == [
             runtime.docker_executable,
             "run",
             "--rm",
+            "--name",
+        ]
+        and SOLVER_CONTAINER_NAME_RE.fullmatch(command[4]) is not None
+        and command[5:19]
+        == [
             "--network",
             "none",
             "--read-only",
@@ -1414,18 +1421,22 @@ def _verify_forward_bundle(
             "--workdir",
             "/tmp",
             "--env",
-            "LD_LIBRARY_PATH=/runtime/lib",
+            SOLVER_ENVIRONMENT[0],
+            "--env",
+            SOLVER_ENVIRONMENT[1],
+            "--env",
+            SOLVER_ENVIRONMENT[2],
             "--mount",
         ]
-        and command[13]
+        and command[19]
         == f"type=bind,source={runtime.runtime_path},target=/runtime,readonly"
-        and command[14] == "--mount"
-        and command[15].startswith("type=bind,source=")
-        and command[15].endswith(",target=/input,readonly")
-        and command[16] == "--mount"
-        and command[17].startswith("type=bind,source=")
-        and command[17].endswith(",target=/output")
-        and command[18:]
+        and command[20] == "--mount"
+        and command[21].startswith("type=bind,source=")
+        and command[21].endswith(",target=/input,readonly")
+        and command[22] == "--mount"
+        and command[23].startswith("type=bind,source=")
+        and command[23].endswith(",target=/output")
+        and command[24:]
         == [
             PINNED_CONTAINER_REF,
             "/runtime/bin/Mod2DMT",

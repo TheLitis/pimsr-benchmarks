@@ -23,6 +23,7 @@ import stat as stat_module
 import subprocess
 import tempfile
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -45,7 +46,14 @@ PINNED_CONTAINER_DIGEST = (
 )
 PINNED_CONTAINER_REF = f"ubuntu:24.04@{PINNED_CONTAINER_DIGEST}"
 
-BUILD_RECIPE_ID = "modem2d-legacy-gfortran-ubuntu24.04-v1"
+BUILD_RECIPE_ID = "modem2d-legacy-gfortran-openblas-ubuntu24.04-v2"
+RUNTIME_DIRECTORY = "runtime-openblas-v2"
+SOLVER_ENVIRONMENT = (
+    "LD_LIBRARY_PATH=/runtime/lib",
+    "OPENBLAS_NUM_THREADS=8",
+    "OMP_NUM_THREADS=1",
+)
+SOLVER_CONTAINER_NAME_RE = re.compile(r"\Apimsr-modem2d-[0-9a-f]{32}\Z")
 BUILD_RECIPE = {
     "configure_source": "f90/CONFIG/Configure.2D_MT.OSU.GFortran",
     "configure_git_blob": "8b34b5c1be5b1ac34398fc30641eae7ea9d06819",
@@ -60,6 +68,16 @@ BUILD_RECIPE = {
     "compiler_version": "13.3.0-6ubuntu2~24.04.1",
     "compile_flags": ["-O3", "-ffree-line-length-none", "-x", "f95-cpp-input"],
     "link_flags": ["-L/usr/lib64", "-llapack", "-lblas"],
+    "blas_runtime": {
+        "provider": "OpenBLAS pthread",
+        "package": "libopenblas0-pthread:amd64",
+        "version": "0.3.26+ds-1ubuntu0.1",
+        "deb_sha256": (
+            "7dc3b4384c02aecb87eb8b70fa26c5843a08af242f4638aa4b36922bdc4f5b04"
+        ),
+        "deb_size_bytes": 7_183_128,
+        "runtime_environment": list(SOLVER_ENVIRONMENT),
+    },
     "packages": {
         "gcc-13": "13.3.0-6ubuntu2~24.04.1",
         "gfortran": "4:13.2.0-7ubuntu1",
@@ -89,25 +107,33 @@ _PINNED_BUILD_FILES: dict[str, tuple[str, int]] = {
         "e035fee7fe4b20d282d9bffe74977b76cc18c58a839b00b09ce12cc7e21cabc9",
         22_172,
     ),
-    "runtime/bin/Mod2DMT": (
+    "runtime-openblas-v2/bin/Mod2DMT": (
         "22dc47a8a81fc2b2dc9d643994e7cc9e0d9ce284050e61bef007238d7980e25c",
         608_288,
     ),
-    "runtime/lib/libblas.so.3": (
-        "e748efcae5753fe4a652877fccdb5895ac6f7605668a2db878b19c914e78e3a8",
-        677_880,
+    "runtime-openblas-v2/lib/libblas.so.3": (
+        "8ba4a98f44d763c2e648755ef452025919e28633339f23ff605044de3483a25d",
+        444_968,
     ),
-    "runtime/lib/libgcc_s.so.1": (
+    "runtime-openblas-v2/lib/libgcc_s.so.1": (
         "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
         183_024,
     ),
-    "runtime/lib/libgfortran.so.5": (
+    "runtime-openblas-v2/lib/libgfortran.so.5": (
         "342618ccfebe840446e4ef2b7893f4161b2084845e570f42d68a70bfde58a58d",
         3_263_912,
     ),
-    "runtime/lib/liblapack.so.3": (
-        "851bb1fc5833ede9ed704b4417a251a899976d5e0915de40452615187a65278f",
-        7_268_368,
+    "runtime-openblas-v2/lib/liblapack.so.3": (
+        "1e82245607c58d13405580c71b9b0134b5a952686ac861f979fc7a886ebd4229",
+        6_802_256,
+    ),
+    "runtime-openblas-v2/lib/libopenblas.so.0": (
+        "bfc7492adbf84a8f567720a9e1fae2afc18f3d817da233e7f4d453683485308e",
+        37_555_760,
+    ),
+    "packages-openblas-v2/libopenblas0-pthread_0.3.26+ds-1ubuntu0.1_amd64.deb": (
+        "7dc3b4384c02aecb87eb8b70fa26c5843a08af242f4638aa4b36922bdc4f5b04",
+        7_183_128,
     ),
 }
 
@@ -1134,11 +1160,11 @@ class VerifiedRuntime:
 
     @property
     def binary_path(self) -> Path:
-        return self.build_root / "runtime" / "bin" / "Mod2DMT"
+        return self.runtime_path / "bin" / "Mod2DMT"
 
     @property
     def runtime_path(self) -> Path:
-        return self.build_root / "runtime"
+        return self.build_root / RUNTIME_DIRECTORY
 
     def require_unchanged(self) -> None:
         current = verify_pinned_runtime(
@@ -1254,6 +1280,32 @@ def verify_pinned_runtime(
         "RepoDigests", []
     ):
         raise ProvenanceError("local Docker image does not match the pinned digest")
+    runtime_path = root / RUNTIME_DIRECTORY
+    linkage = _run_capture(
+        (
+            docker_executable,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--env",
+            SOLVER_ENVIRONMENT[0],
+            "--mount",
+            _docker_mount(runtime_path, "/runtime", readonly=True),
+            PINNED_CONTAINER_REF,
+            "ldd",
+            "/runtime/bin/Mod2DMT",
+        )
+    ).stdout
+    expected_linkage = (
+        "liblapack.so.3 => /runtime/lib/liblapack.so.3",
+        "libgfortran.so.5 => /runtime/lib/libgfortran.so.5",
+        "libgcc_s.so.1 => /runtime/lib/libgcc_s.so.1",
+        "libopenblas.so.0 => /runtime/lib/libopenblas.so.0",
+    )
+    if not all(item in linkage for item in expected_linkage):
+        raise ProvenanceError("pinned OpenBLAS runtime linkage is invalid")
     docker_versions = _run_capture(
         (
             docker_executable,
@@ -1284,6 +1336,8 @@ def verify_pinned_runtime(
             "repo_digest": repo_digest,
             "docker_versions_json_pair": docker_versions,
         },
+        "runtime_environment": list(SOLVER_ENVIRONMENT),
+        "runtime_linkage": list(expected_linkage),
         "build_recipe_id": BUILD_RECIPE_ID,
         "build_recipe": BUILD_RECIPE,
         "artifacts": artifact_records,
@@ -1527,10 +1581,13 @@ def _run_solver(
     solver_dir: Path,
     timeout_seconds: float,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], float]:
+    container_name = f"pimsr-modem2d-{uuid.uuid4().hex}"
     command = [
         runtime.docker_executable,
         "run",
         "--rm",
+        "--name",
+        container_name,
         "--network",
         "none",
         "--read-only",
@@ -1538,21 +1595,25 @@ def _run_solver(
         "/tmp:rw,noexec,nosuid,size=64m",
         "--workdir",
         "/tmp",
-        "--env",
-        "LD_LIBRARY_PATH=/runtime/lib",
-        "--mount",
-        _docker_mount(runtime.runtime_path, "/runtime", readonly=True),
-        "--mount",
-        _docker_mount(input_dir, "/input", readonly=True),
-        "--mount",
-        _docker_mount(solver_dir, "/output", readonly=False),
-        PINNED_CONTAINER_REF,
-        "/runtime/bin/Mod2DMT",
-        "-F",
-        "/input/model.rho",
-        "/input/template.dat",
-        "/output/forward.dat",
     ]
+    for variable in SOLVER_ENVIRONMENT:
+        command.extend(("--env", variable))
+    command.extend(
+        (
+            "--mount",
+            _docker_mount(runtime.runtime_path, "/runtime", readonly=True),
+            "--mount",
+            _docker_mount(input_dir, "/input", readonly=True),
+            "--mount",
+            _docker_mount(solver_dir, "/output", readonly=False),
+            PINNED_CONTAINER_REF,
+            "/runtime/bin/Mod2DMT",
+            "-F",
+            "/input/model.rho",
+            "/input/template.dat",
+            "/output/forward.dat",
+        )
+    )
     started = time.monotonic()
     try:
         process = subprocess.run(
@@ -1565,6 +1626,20 @@ def _run_solver(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
+        cleanup = subprocess.run(
+            [runtime.docker_executable, "rm", "--force", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60.0,
+        )
+        if cleanup.returncode != 0 and "No such container" not in cleanup.stderr:
+            raise RuntimeError(
+                "ModEM forward timed out and its Docker container could not be removed: "
+                f"{cleanup.stderr.strip()}"
+            ) from exc
         raise TimeoutError(f"ModEM forward exceeded {timeout_seconds:g} seconds") from exc
     elapsed = time.monotonic() - started
     if process.returncode != 0:
